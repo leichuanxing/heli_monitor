@@ -39,6 +39,9 @@ printf '[3/4] 生成 SHA-256 校验文件\n'
 
 printf '[4/4] 生成完整离线部署包\n'
 tar -czf "$OUTPUT_FILE" -C "$PROJECT_DIR" offline
-sha256sum "$OUTPUT_FILE" > "${OUTPUT_FILE}.sha256"
+(
+  cd "$(dirname "$OUTPUT_FILE")"
+  sha256sum "$(basename "$OUTPUT_FILE")" > "$(basename "$OUTPUT_FILE").sha256"
+)
 printf '完成：%s\n' "$OUTPUT_FILE"
 printf '校验：%s.sha256\n' "$OUTPUT_FILE"
