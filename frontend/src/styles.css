@@ -1,0 +1,32 @@
+:root{font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;color:#172033;background:#f3f5f8;font-synthesis:none;--brand:#174b7a;--brand-dark:#0e3153;--accent:#2b78c5;--border:#dfe5ec;--muted:#68758a}*{box-sizing:border-box}html,body,#app{margin:0;min-width:320px;min-height:100vh}body{background:#f3f5f8}a{text-decoration:none;color:inherit}.el-card{border:1px solid var(--border)!important;border-radius:6px!important;box-shadow:0 2px 8px rgba(26,48,73,.05)!important}.el-button{border-radius:4px!important}.el-button--primary{--el-button-bg-color:var(--brand);--el-button-border-color:var(--brand);--el-button-hover-bg-color:#23669f;--el-button-hover-border-color:#23669f}.el-input__wrapper,.el-select__wrapper,.el-textarea__inner{border-radius:4px!important}.el-table{--el-table-header-bg-color:#f6f8fa;--el-table-header-text-color:#344054}.el-dialog{border-radius:7px!important}.page-title{font-size:22px;font-weight:650;letter-spacing:.01em;margin:0}.page-subtitle{color:var(--muted);font-size:13px;margin-top:7px}
+
+/* Shared business UI: consistent density, focus, scrolling and responsive forms. */
+:root{--el-color-primary:#174b7a;--el-border-color:#dfe5ec;--el-text-color-regular:#40546a;--el-font-size-base:14px}
+.content-wrap .page-head,.content-wrap .heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+.content-wrap .filters,.content-wrap .toolbar,.content-wrap .actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.content-wrap .filters{margin-bottom:18px}
+.content-wrap .filters>.el-input{width:260px;max-width:100%}
+.content-wrap .el-card{border-radius:10px!important;box-shadow:0 4px 18px #19344c08!important}
+.content-wrap .el-card__header{padding:18px 20px;background:linear-gradient(180deg,#fff,#fcfdff)}
+.content-wrap .el-table{--el-table-row-hover-bg-color:#edf5fc;--el-table-header-bg-color:#f4f7fb;font-size:13px}
+.content-wrap .el-table th.el-table__cell{height:44px;font-weight:650}
+.content-wrap .el-table td.el-table__cell{padding:12px 0}
+.row-actions{display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:nowrap;white-space:nowrap}
+.row-actions .el-button+.el-button{margin-left:0}
+.el-dialog{max-width:calc(100vw - 32px);border-radius:12px!important;max-height:calc(100dvh - 48px);display:flex;flex-direction:column;margin-top:24px!important}
+.el-dialog__header{padding:10px 16px 18px;border-bottom:1px solid var(--border)}
+.el-dialog__body{overflow-y:auto;min-height:0;padding:20px 16px}
+.el-dialog__footer{border-top:1px solid var(--border);padding:16px 16px 8px}
+.el-form-item__label{font-weight:550}
+.el-form-item .el-select{max-width:100%}
+.el-table__empty-block{min-height:140px}
+.el-pagination{margin-top:20px;justify-content:flex-end;flex-wrap:wrap;gap:8px}
+.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 20px}
+.form-grid .wide{grid-column:1/-1}
+.switch-row{padding:14px 16px;background:#f6f9fc;border-radius:8px}
+.switch-row>div{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.switch-row span{font-size:12px;color:var(--muted)}
+.switch-row .el-switch{margin-left:auto}
+button:focus-visible,a:focus-visible{outline:2px solid #4195d4;outline-offset:3px}
+@media(max-width:800px){.content-wrap .heading,.content-wrap .page-head{align-items:flex-start}.content-wrap .toolbar,.content-wrap .filters,.content-wrap .actions{width:100%}.content-wrap .toolbar>.el-input,.content-wrap .filters>.el-input{flex:1 1 180px;width:auto}.el-card__body{padding:16px}.form-grid{grid-template-columns:1fr}.el-dialog__body{padding:16px 8px}.el-pagination{justify-content:center}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}

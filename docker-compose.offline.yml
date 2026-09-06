@@ -1,0 +1,79 @@
+name: heli-monitor
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  backend:
+    image: heli-monitor-backend:latest
+    env_file: .env
+    command: ["/app/entrypoint.sh", "web"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      start_period: 90s
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+  worker:
+    image: heli-monitor-worker:latest
+    env_file: .env
+    command: ["/app/entrypoint.sh", "worker"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+  beat:
+    image: heli-monitor-beat:latest
+    env_file: .env
+    command: ["/app/entrypoint.sh", "beat"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+  frontend:
+    image: heli-monitor-frontend:latest
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["${NGINX_PORT:-80}:80"]
+    volumes: ["./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro"]
+    depends_on:
+      backend: {condition: service_healthy}
+      frontend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+volumes:
+  postgres_data:
+  redis_data:
