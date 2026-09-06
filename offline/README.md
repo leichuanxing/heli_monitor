@@ -101,4 +101,4 @@ chmod +x build-package.sh
 ./build-package.sh
 ```
 
-默认在项目根目录生成 `heli-monitor-offline-el9-x86_64.tar.gz` 及对应的 `.sha256` 校验文件，也可以把目标文件路径作为第一个参数传入。
+版本号读取自项目根目录的 `VERSION`。默认生成 `heli-monitor-offline-v1.0.1-el9-x86_64.tar.gz` 及对应的 `.sha256` 校验文件，也可以把目标文件路径作为第一个参数传入。

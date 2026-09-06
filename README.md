@@ -1,5 +1,7 @@
 # 合力数据业务监控系统
 
+当前版本：`v1.0.1`
+
 企业级业务可用性监控平台，支持 HTTP、API、TCP、PING、DNS、SSL 等探测任务，以及故障事件、告警规则、邮件、Webhook、企业微信、钉钉和 Server 酱通知。系统提供监控总览、科技感监控大屏、探测结果、SLA 报表、状态页、用户管理和审计日志。
 
 ![合力数据业务监控系统主页](docs/homepage.png)
@@ -98,7 +100,7 @@ docker compose exec backend python manage.py createsuperuser
 `offline/` 提供 EL9 x86_64 环境的完整离线安装方案，包含应用镜像、Docker/Compose RPM、应用代码、完整性校验和交互式安装向导。安装时会引导输入业务端口、系统管理员用户名、至少 8 位的密码、管理员邮箱和部署目录，并在终端显示 Django 数据库迁移过程。
 
 ```bash
-tar -xzf heli-monitor-offline-el9-x86_64.tar.gz
+tar -xzf heli-monitor-offline-v1.0.1-el9-x86_64.tar.gz
 cd offline
 chmod +x install.sh manage.sh
 ./install.sh

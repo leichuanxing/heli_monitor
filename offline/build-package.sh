@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUTPUT_FILE="${1:-$PROJECT_DIR/heli-monitor-offline-el9-x86_64.tar.gz}"
+VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")"
+[[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'ERROR: VERSION 格式无效\n' >&2; exit 1; }
+OUTPUT_FILE="${1:-$PROJECT_DIR/heli-monitor-offline-${VERSION}-el9-x86_64.tar.gz}"
 IMAGE_ARCHIVE="$SCRIPT_DIR/images/heli-monitor-images.tar.gz"
 DOCKER_ARCHIVE="$SCRIPT_DIR/docker/docker-ce-el9-x86_64-rpms.tar.gz"
 CODE_ARCHIVE="$SCRIPT_DIR/packages/heli-monitor-code.tar.gz"
@@ -16,7 +18,7 @@ command -v sha256sum >/dev/null 2>&1 || fail "未检测到 sha256sum"
 
 printf '[1/4] 封装当前应用代码\n'
 tar -czf "$CODE_ARCHIVE" -C "$PROJECT_DIR" \
-  backend frontend deploy scripts docker-compose.offline.yml README.md .env.example
+  backend frontend deploy scripts docker-compose.offline.yml README.md .env.example VERSION
 
 printf '[2/4] 生成组件清单\n'
 {
