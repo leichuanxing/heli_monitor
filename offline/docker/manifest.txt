@@ -1,0 +1,10 @@
+Docker 离线安装包清单
+=====================
+
+目标系统：EL9 兼容发行版（Rocky Linux 9、AlmaLinux 9、RHEL 9 等）
+处理器架构：x86_64
+RPM 数量：132
+包含组件：Docker CE、Docker CLI、containerd.io、Docker Buildx、Docker Compose v2 及离线依赖
+安装方式：dnf --disablerepo='*'，安装过程不访问外部软件源
+归档文件：docker-ce-el9-x86_64-rpms.tar.gz
+SHA-256：9d8d615ba55ca911c229971c31cdb0c280ad081bf0ca8be8ece8b9f988abe1dc

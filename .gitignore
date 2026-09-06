@@ -15,7 +15,12 @@ dist/
 *.log
 *.tar
 *.tar.gz
+/*.tar.gz.sha256
 localsoft/
+offline/docker/*.tar.gz
+offline/images/*.tar.gz
+offline/packages/*.tar.gz
+offline/*.tar.gz
 .codex-known-hosts
 .idea/
 .vscode/

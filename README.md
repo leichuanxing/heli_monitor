@@ -93,6 +93,19 @@ docker compose exec backend python manage.py createsuperuser
 - 存活检查：`http://服务器地址/health/live`
 - 就绪检查：`http://服务器地址/health/ready`
 
+## 离线部署包
+
+`offline/` 提供 EL9 x86_64 环境的完整离线安装方案，包含应用镜像、Docker/Compose RPM、应用代码、完整性校验和交互式安装向导。安装时会引导输入业务端口、系统管理员用户名、至少 8 位的密码、管理员邮箱和部署目录，并在终端显示 Django 数据库迁移过程。
+
+```bash
+tar -xzf heli-monitor-offline-el9-x86_64.tar.gz
+cd offline
+chmod +x install.sh manage.sh
+./install.sh
+```
+
+如果目标机器已经安装可用的 Docker Engine 与 Docker Compose，安装向导会跳过 Docker 安装；否则使用包内 RPM 离线安装。构建交付包的方法见 [offline/README.md](offline/README.md)。
+
 ## 基本使用流程
 
 1. 使用管理员账号登录。系统用户密码至少为 8 位，首次登录后建议立即修改初始密码。

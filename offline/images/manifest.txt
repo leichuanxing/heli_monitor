@@ -1,0 +1,2 @@
+离线镜像归档：heli-monitor-images.tar.gz
+包含镜像：postgres:16-alpine, redis:7-alpine, nginx:1.27-alpine, heli-monitor-backend:latest, heli-monitor-worker:latest, heli-monitor-beat:latest, heli-monitor-frontend:latest
