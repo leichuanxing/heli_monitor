@@ -8,6 +8,8 @@ import { GridComponent, TooltipComponent, LegendComponent, DataZoomComponent } f
 import { CanvasRenderer } from 'echarts/renderers'
 echarts.use([ScatterChart,LineChart,GridComponent,TooltipComponent,LegendComponent,DataZoomComponent,CanvasRenderer])
 import client from '../api/client'
+import { chartAppearance } from '../composables/chartAppearance'
+import { theme } from '../stores/theme'
 import type { HistoryResponse, MonitorResult } from '../api/monitorTypes'
 
 const props=defineProps<{monitorId?:string}>()
@@ -34,21 +36,22 @@ function validRange(){
 function render(){
  if(!chartElement.value||!data.value||disposed)return
  chart ||= echarts.init(chartElement.value)
+ const appearance=chartAppearance()
  const grouped=new Map<string,HistoryResponse['series']>()
  for(const point of data.value.series){const points=grouped.get(point.monitor)||[];points.push(point);grouped.set(point.monitor,points)}
  const groups=[...grouped.entries()]
  const taskName=(id:string)=>monitors.value.find(m=>m.id===id)?.name||'任务 '+id.slice(0,8)
- const xAxis={type:'time',min:new Date(data.value.checked_after).getTime(),max:new Date(data.value.checked_before).getTime(),axisLabel:{hideOverlap:true}}
- const dataZoom=[{type:'inside',filterMode:'none'},{type:'slider',height:18,bottom:8,filterMode:'none'}]
+ const xAxis={type:'time',min:new Date(data.value.checked_after).getTime(),max:new Date(data.value.checked_before).getTime(),axisLabel:{...appearance.xAxis.axisLabel,hideOverlap:true}}
+ const dataZoom=[{type:'inside',filterMode:'none'},{type:'slider',height:20,bottom:8,filterMode:'none',borderColor:'transparent',fillerColor:theme.value==='dark'?'#76a5ff22':'#2867dc14',textStyle:appearance.textStyle,handleStyle:{color:appearance.color[0]},dataBackground:{lineStyle:{color:appearance.color[0],opacity:0.3},areaStyle:{opacity:0.05}}}]
  const legend={type:'scroll',top:0,bottom:'auto',data:groups.map(([id])=>taskName(id))}
- chart.setOption({animation:false,tooltip:{trigger:'axis'},legend,grid:{left:55,right:35,bottom:65,top:45},xAxis,
-  yAxis:{type:'value',name:'实际响应(ms)'},dataZoom,
+ chart.setOption({...appearance,tooltip:{...appearance.tooltip,trigger:'axis'},legend:{...legend,textStyle:appearance.textStyle},grid:{left:55,right:25,bottom:65,top:45},xAxis:{...appearance.xAxis,...xAxis},
+  yAxis:{...appearance.yAxis,type:'value',name:'实际响应(ms)'},dataZoom,
   series:groups.map(([id,points])=>({name:taskName(id),type:'line',smooth:0.6,encode:{x:0,y:1,tooltip:[1]},showSymbol:false,symbolSize:4,connectNulls:false,
    data:points.map(x=>[new Date(x.at).getTime(),x.latency_ms,x.id]),lineStyle:{width:2},emphasis:{focus:'series'}}))},true)
  if(availabilityElement.value){
   availabilityChart ||= echarts.init(availabilityElement.value)
-  availabilityChart.setOption({animation:false,tooltip:{trigger:'item',formatter:(p:any)=>`${escapeHtml(String(p.seriesName))}<br/>${new Date(p.value[0]).toLocaleString()}<br/>${p.value[1]?'成功':'失败'} · 记录 #${p.value[2]}`},legend,grid:{left:55,right:35,bottom:65,top:45},xAxis,dataZoom,
-   yAxis:{type:'value',min:0,max:1,interval:1,axisLabel:{formatter:(value:number)=>value===1?'成功':'失败'}},
+  availabilityChart.setOption({...appearance,tooltip:{...appearance.tooltip,trigger:'item',formatter:(p:any)=>`${escapeHtml(String(p.seriesName))}<br/>${new Date(p.value[0]).toLocaleString()}<br/>${p.value[1]?'成功':'失败'} · 记录 #${p.value[2]}`},legend:{...legend,textStyle:appearance.textStyle},grid:{left:55,right:25,bottom:65,top:45},xAxis:{...appearance.xAxis,...xAxis},dataZoom,
+   yAxis:{...appearance.yAxis,type:'value',min:0,max:1,interval:1,axisLabel:{...appearance.yAxis.axisLabel,formatter:(value:number)=>value===1?'成功':'失败'}},
    series:groups.map(([id,points])=>({name:taskName(id),type:'scatter',symbolSize:5,progressive:5000,
     data:points.map(x=>[new Date(x.at).getTime(),x.success?1:0,x.id]),
     itemStyle:{color:(p:any)=>p.value[1]?'#38a378':'#db5b64'}}))},true)
@@ -72,6 +75,7 @@ async function options(){
  if(!disposed){monitors.value=result;render()}
 }
 function showDetail(row:MonitorResult){detail.value=row;detailVisible.value=true}
+watch(theme,()=>{const appearance=chartAppearance();for(const instance of [chart,availabilityChart])instance?.setOption({...appearance,legend:{textStyle:appearance.textStyle}})})
 watch(()=>props.monitorId||route.params.monitorId||route.query.monitor,value=>{monitor.value=String(value||'');filterChanged()})
 onMounted(async()=>{load();options().catch(()=>ElMessage.error('任务选项加载失败'));await nextTick();if(chartElement.value){observer=new ResizeObserver(()=>{chart?.resize();availabilityChart?.resize()});observer.observe(chartElement.value);if(availabilityElement.value)observer.observe(availabilityElement.value)}})
 onBeforeUnmount(()=>{disposed=true;version++;observer?.disconnect();chart?.dispose();availabilityChart?.dispose()})
@@ -98,5 +102,5 @@ onBeforeUnmount(()=>{disposed=true;version++;observer?.disconnect();chart?.dispo
  <el-dialog v-model="detailVisible" title="历史探测详情" width="760px"><template v-if="detail"><el-descriptions :column="2" border><el-descriptions-item label="任务">{{detail.monitor_name}}</el-descriptions-item><el-descriptions-item label="时间">{{fmt(detail.checked_at)}}</el-descriptions-item><el-descriptions-item label="目标" :span="2">{{detail.monitor_target}}</el-descriptions-item><el-descriptions-item label="状态码">{{detail.status_code??'—'}}</el-descriptions-item><el-descriptions-item label="证书剩余">{{detail.ssl_days_remaining??'—'}} 天</el-descriptions-item><el-descriptions-item label="丢包率">{{detail.packet_loss??'—'}}%</el-descriptions-item><el-descriptions-item label="响应耗时">{{number(detail.latency_ms)}} ms</el-descriptions-item></el-descriptions><h4>断言与指标</h4><pre>{{JSON.stringify({assertions:detail.assertions,metrics:detail.metrics,detail:detail.detail},null,2)}}</pre></template></el-dialog>
 </template>
 <style scoped>
-.history-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.history-heading h2{margin:0}.history-heading p{margin:6px 0 0;color:#7c8b9b}.filter-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.filter-row+.filter-row{margin-top:14px}.filter-row .el-select{width:190px}.filter-row .el-input{width:220px}.filter-row small{color:#8492a6}.history-summary{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:16px 0}.history-summary>div{padding:16px;background:#fff;border:1px solid #dfe6ed;border-top:3px solid #347fd3;border-radius:6px}.history-summary span{display:block;color:#7c8b9b;font-size:12px}.history-summary b{display:block;font-size:23px;margin-top:8px}.history-summary small{font-size:12px}.history-chart,.history-table{margin-top:16px}.chart-heading{display:flex;justify-content:space-between}.chart-heading small{color:#8492a6}.el-pagination{margin-top:16px;justify-content:flex-end}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f7fa;padding:14px;max-height:350px;overflow:auto}@media(max-width:900px){.history-summary{grid-template-columns:repeat(2,1fr)}}
+.history-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.history-heading h2{margin:0}.history-heading p{margin:6px 0 0;color:var(--muted)}.filter-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.filter-row+.filter-row{margin-top:14px}.filter-row .el-select{width:190px}.filter-row .el-input{width:220px}.filter-row small{color:var(--muted)}.history-summary{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:16px 0}.history-summary>div{padding:16px;background:var(--surface);border:1px solid var(--border);border-top:3px solid #347fd3;border-radius:6px}.history-summary span{display:block;color:var(--muted);font-size:12px}.history-summary b{display:block;font-size:23px;margin-top:8px}.history-summary small{font-size:12px}.history-chart,.history-table{margin-top:16px}.chart-heading{display:flex;justify-content:space-between}.chart-heading small{color:var(--muted)}.el-pagination{margin-top:16px;justify-content:flex-end}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-subtle);padding:14px;max-height:350px;overflow:auto}@media(max-width:900px){.history-summary{grid-template-columns:repeat(2,1fr)}}
 </style>

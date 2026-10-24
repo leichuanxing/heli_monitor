@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import MonitorWallView from './MonitorWallView.vue'
+import { theme } from '../stores/theme'
 const { get,setOption }=vi.hoisted(()=>({get:vi.fn(),setOption:vi.fn()}))
 vi.mock('echarts/core',()=>({use:vi.fn(),init:()=>({setOption,resize:vi.fn(),dispose:vi.fn()}),graphic:{LinearGradient:class{}}}))
 vi.mock('../stores/systemSettings',()=>({loadSystemSettings:vi.fn().mockResolvedValue({}),systemSettings:{monitor_wall_refresh_seconds:10}}))
@@ -38,4 +39,16 @@ it('reloads the selected period and applies its exact bounds to the time axis',a
  const chart=setOption.mock.calls.filter(([option])=>option.xAxis).at(-1)![0]
  expect(chart.xAxis.min).toBe(new Date(request.checked_after).getTime())
  expect(chart.xAxis.max).toBe(new Date(request.checked_before).getTime());wrapper.unmount()
+})
+it('repaints the theme without fetching or changing probe points',async()=>{
+ const wrapper=shallowMount(MonitorWallView);await flushPromises()
+ const calls=get.mock.calls.length
+ const before=setOption.mock.calls.filter(([option])=>option.xAxis).at(-1)![0]
+ theme.value=theme.value==='dark'?'light':'dark';await flushPromises()
+ const after=setOption.mock.calls.filter(([option])=>option.xAxis).at(-1)![0]
+ expect(get.mock.calls).toHaveLength(calls)
+ expect(after.series[0].data).toEqual(before.series[0].data)
+ expect(after.xAxis.min).toBe(before.xAxis.min)
+ expect(after.tooltip.textStyle.color).not.toBe(before.tooltip.textStyle.color)
+ wrapper.unmount();theme.value='light'
 })

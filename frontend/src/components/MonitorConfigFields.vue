@@ -121,4 +121,4 @@ defineExpose({normalize})
   <template v-else-if="type==='SSL'"><el-divider content-position="left">SSL 证书参数</el-divider><el-form-item label="进入预警期时"><el-select v-model="config.expiry_action"><el-option label="状态降级（仅提示，不触发故障通知）" value="warn"/><el-option label="探测失败（按关联告警规则通知）" value="fail"/></el-select></el-form-item><el-form-item label="到期预警天数"><el-input-number v-model="config.warn_days" :min="1" :max="3650"/></el-form-item></template>
 </template>
 
-<style scoped>.config-alert{margin:0 0 16px}.config-note{margin:0 0 18px 140px;color:#7f8da0;font-size:12px}.el-select{width:100%}</style>
+<style scoped>.config-alert{margin:0 0 16px}.config-note{margin:0 0 18px 140px;color:var(--muted);font-size:12px}.el-select{width:100%}</style>
