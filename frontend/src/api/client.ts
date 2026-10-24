@@ -16,7 +16,7 @@ client.interceptors.request.use(config => {
 
 client.interceptors.response.use(response => response, async error => {
   const config = error.config
-  if (error.response?.status !== 401 || !config || config._retry || config.url?.startsWith('/auth/')) {
+  if (error.response?.status !== 401 || !config || config._retry || ['/auth/login/','/auth/refresh/','/auth/logout/'].includes(config.url||'')) {
     return Promise.reject(error)
   }
   config._retry = true

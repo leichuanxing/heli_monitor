@@ -30,6 +30,7 @@ for prefix, view in [
 urlpatterns = router.urls + [
     path("auth/me/", current_user),
     path("dashboard/summary/", dashboard_summary),
+    path("reports/options/", report_options),
     path("reports/sla/", sla_report),
     path("reports/sla/export.csv", sla_export),
     path("system/overview/", system_overview),

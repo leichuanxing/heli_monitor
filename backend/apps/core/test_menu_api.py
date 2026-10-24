@@ -61,7 +61,7 @@ def test_role_permissions_and_user_organization_are_enforced(api):
         "/api/v1/users/",
         {
             "username": "viewer1",
-            "password": "View3r!1",
+            "password": "ReadOnly!2026abcd",
             "department": str(department.id),
             "phone": "13800000000",
             "data_scope": "DEPARTMENT",
@@ -109,9 +109,7 @@ def test_crud_forms_and_key_actions(api):
         format="json",
     )
     assert monitor.status_code == 201
-    with patch(
-        "apps.core.tasks.execute_probe", return_value={"success": True, "status_code": 200}
-    ):
+    with patch("apps.core.tasks.execute_probe", return_value={"success": True, "status_code": 200}):
         assert api.post(f"/api/v1/monitors/{monitor.data['id']}/test/").data["success"]
         report = api.post("/api/v1/monitors/test-all/").data
         assert report["total"] == report["passed"] == 1
@@ -122,7 +120,7 @@ def test_crud_forms_and_key_actions(api):
 
 
 @pytest.mark.django_db
-def test_monitor_delete_archives_and_preserves_history(api):
+def test_monitor_delete_permanently_removes_history(api):
     business = BusinessSystem.objects.create(name="删除测试业务", code="DELETE-BIZ")
     monitor = Monitor.objects.create(
         business=business,
@@ -145,13 +143,9 @@ def test_monitor_delete_archives_and_preserves_history(api):
     )
     response = api.delete(f"/api/v1/monitors/{monitor.id}/")
     assert response.status_code == 204
-    monitor.refresh_from_db()
-    assert monitor.is_archived is True
-    assert monitor.is_enabled is False
-    assert Incident.objects.filter(pk=incident.pk, monitor=monitor).exists()
-    incident.refresh_from_db()
-    assert incident.status == "CLOSED"
-    assert incident.resolution == "探测任务已删除，事件自动关闭"
+    assert not Monitor.objects.filter(pk=monitor.pk).exists()
+    assert not MonitorResult.objects.filter(pk=result.pk).exists()
+    assert not Incident.objects.filter(pk=incident.pk).exists()
     listed = api.get("/api/v1/monitors/").data["results"]
     assert not any(str(item["id"]) == str(monitor.id) for item in listed)
     result_ids = [item["id"] for item in api.get("/api/v1/monitor-results/").data["results"]]
@@ -177,11 +171,11 @@ def test_real_notification_test_result_and_bulk_summary(api):
 def test_user_password_incident_and_readonly_guards(api):
     created = api.post(
         "/api/v1/users/",
-        {"username": "operator1", "password": "Op3r!123", "is_active": True},
+        {"username": "operator1", "password": "OpsSecure!2026abcd", "is_active": True},
         format="json",
     )
     assert created.status_code == 201
-    assert User.objects.get(username="operator1").check_password("Op3r!123")
+    assert User.objects.get(username="operator1").check_password("OpsSecure!2026abcd")
     too_short = api.post(
         "/api/v1/users/",
         {"username": "operator2", "password": "1234567", "is_active": True},
@@ -277,7 +271,9 @@ def test_serverchan_channel_validation_masking_and_delivery(api):
     )
     assert updated.status_code == 200
     channel = NotificationChannel.objects.get(id=created.data["id"])
-    assert channel.config["sendkey"] == "SCT000000000000000000000000000000T"
+    from apps.core.secrets import decrypt_secret
+
+    assert decrypt_secret(channel.config["sendkey"]) == "SCT000000000000000000000000000000T"
     assert channel.config["timeout"] == 12
 
 
@@ -401,7 +397,7 @@ def test_monitor_result_retention_keeps_newest_records_for_each_monitor():
             target="example.com:443",
         ),
     ]
-    now = timezone.now()
+    now = timezone.now() - timedelta(days=40)
     for monitor_index, monitor in enumerate(monitors):
         for index in range(5):
             at = now + timedelta(seconds=index)

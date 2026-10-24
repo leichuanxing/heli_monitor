@@ -7,17 +7,24 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.db import connection
-from django.db.models import Avg, Count, Q
-from django.db.models.deletion import ProtectedError
+from django.db import connection, transaction
+from django.db.models import Avg, Count, Q, TextField
+from django.db.models.fields.json import KeyTextTransform
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from redis import Redis
-from rest_framework import viewsets
-from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
-from rest_framework.exceptions import ValidationError
+from rest_framework import serializers, viewsets
+from rest_framework.decorators import (
+    action,
+    api_view,
+    authentication_classes,
+    permission_classes,
+    throttle_classes,
+)
+from rest_framework.exceptions import MethodNotAllowed, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
@@ -37,10 +44,20 @@ from apps.monitors.models import (
 )
 from apps.status_pages.models import StatusPage
 
+from .iam import SYSTEM_ROLES, guard_role, guard_user
 from .models import SystemSetting
+from .monitor_api import (
+    MonitorActionsMixin,
+    MonitorEnabledInput,
+    ResultFilterInput,
+    selected_monitors,
+)
+from .monitor_deletion import delete_monitor
 from .notifications import send_notification, send_test_notification
 from .permissions import (
     PERMISSION_CATALOG,
+    HasMonitorViewPermission,
+    HasReportViewPermission,
     HasSystemManagePermission,
     HasSystemViewPermission,
     IsOperatorOrReadOnly,
@@ -60,6 +77,7 @@ class BaseViewSet(viewsets.ModelViewSet):
     ordering_fields = ["created_at", "updated_at", "name", "status"]
     ordering = ["pk"]
 
+    @transaction.atomic
     def perform_create(self, serializer):
         obj = serializer.save()
         AuditLog.objects.create(
@@ -71,6 +89,7 @@ class BaseViewSet(viewsets.ModelViewSet):
             source_ip=self.request.META.get("REMOTE_ADDR"),
         )
 
+    @transaction.atomic
     def perform_update(self, serializer):
         obj = serializer.save()
         AuditLog.objects.create(
@@ -82,6 +101,7 @@ class BaseViewSet(viewsets.ModelViewSet):
             source_ip=self.request.META.get("REMOTE_ADDR"),
         )
 
+    @transaction.atomic
     def perform_destroy(self, instance):
         AuditLog.objects.create(
             actor=self.request.user,
@@ -148,14 +168,27 @@ class DepartmentViewSet(BaseViewSet):
     def get_queryset(self):
         return Department.objects.select_related("parent").annotate(user_count=Count("userprofile"))
 
+    @transaction.atomic
+    def perform_update(self, serializer):
+        list(Department.objects.select_for_update().order_by("pk"))
+        serializer.validate(serializer.validated_data)
+        super().perform_update(serializer)
+
+    @transaction.atomic
     def perform_destroy(self, instance):
-        try:
-            super().perform_destroy(instance)
-        except ProtectedError as exc:
-            raise ValidationError({"detail": "该部门存在下级部门，不能删除"}) from exc
+        instance = Department.objects.select_for_update().get(pk=instance.pk)
+        if (
+            instance.children.exists()
+            or instance.userprofile_set.exists()
+            or BusinessSystem.objects.filter(department=instance).exists()
+        ):
+            raise ValidationError({"detail": "部门仍有下级、成员或业务关联，请先调整归属"})
+        super().perform_destroy(instance)
 
 
 class RoleViewSet(BaseViewSet):
+    ordering_fields = ("name", "code", "is_enabled", "created_at", "updated_at")
+    ordering = ("name", "pk")
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
     search_fields = ("name", "code", "description")
@@ -164,12 +197,31 @@ class RoleViewSet(BaseViewSet):
     def get_queryset(self):
         return Role.objects.annotate(user_count=Count("users")).prefetch_related("users")
 
+    @transaction.atomic
+    def perform_update(self, serializer):
+        list(Role.objects.select_for_update().order_by("pk"))
+        serializer.instance = Role.objects.get(pk=serializer.instance.pk)
+        guard_role(self.request.user, serializer.instance, serializer.validated_data)
+        super().perform_update(serializer)
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        instance = Role.objects.select_for_update().get(pk=instance.pk)
+        guard_role(self.request.user, instance, {}, deleting=True)
+        if instance.code in SYSTEM_ROLES or instance.users.exists():
+            raise ValidationError(
+                {"detail": "系统角色或已分配用户的角色不能删除，请先调整关联或停用"}
+            )
+        super().perform_destroy(instance)
+
     @action(detail=False, methods=["get"], url_path="permission-catalog")
     def permission_catalog(self, request):
         return Response(PERMISSION_CATALOG)
 
 
 class UserViewSet(BaseViewSet):
+    ordering_fields = ("username", "date_joined", "is_active", "id")
+    ordering = ("username", "pk")
     queryset = (
         User.objects.select_related("profile", "profile__department")
         .prefetch_related("business_roles")
@@ -179,14 +231,32 @@ class UserViewSet(BaseViewSet):
     search_fields = ("username", "first_name", "last_name", "email")
     filterset_fields = ("is_active", "business_roles", "profile__department")
 
+    @extend_schema(responses={200: OpenApiTypes.OBJECT})
+    @action(detail=False, methods=["get"])
+    def options(self, request):
+        return Response(
+            {
+                "roles": RoleSerializer(Role.objects.order_by("name"), many=True).data,
+                "departments": list(
+                    Department.objects.order_by("sort_order", "name").values(
+                        "id", "name", "parent_id", "is_enabled"
+                    )
+                ),
+            }
+        )
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        list(User.objects.select_for_update().filter(is_superuser=True).order_by("pk"))
+        serializer.instance = User.objects.select_for_update().get(pk=serializer.instance.pk)
+        guard_user(self.request.user, serializer.instance, serializer.validated_data)
+        super().perform_update(serializer)
+
+    @transaction.atomic
     def perform_destroy(self, instance):
-        if instance == self.request.user:
-            raise ValidationError({"detail": "不能删除当前登录用户"})
-        if (
-            instance.is_superuser
-            and User.objects.filter(is_superuser=True, is_active=True).count() <= 1
-        ):
-            raise ValidationError({"detail": "不能删除最后一个有效超级管理员"})
+        list(User.objects.select_for_update().filter(is_superuser=True).order_by("pk"))
+        instance = User.objects.select_for_update().get(pk=instance.pk)
+        guard_user(self.request.user, instance, {}, deleting=True)
         super().perform_destroy(instance)
 
 
@@ -202,16 +272,87 @@ def current_user(request):
     )
 
 
-BusinessGroupViewSet = make_viewset(BusinessGroup, BusinessGroupSerializer, ("name",))
-TagViewSet = make_viewset(Tag, TagSerializer, ("name",))
-BusinessSystemViewSet = make_viewset(
-    BusinessSystem,
-    BusinessSystemSerializer,
-    ("name", "code", "description"),
-    ("group", "department", "owner", "level", "environment", "is_enabled", "is_archived"),
-)
+class BusinessGroupViewSet(BaseViewSet):
+    queryset = BusinessGroup.objects.select_related("parent").all()
+    serializer_class = BusinessGroupSerializer
+    search_fields = ("name", "parent__name")
+    filterset_fields = ("parent",)
+    ordering_fields = ("name", "sort_order", "created_at")
+    ordering = ("sort_order", "name", "pk")
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        instance = BusinessGroup.objects.select_for_update().get(pk=instance.pk)
+        if instance.children.exists() or instance.businesses.exists():
+            raise ValidationError({"detail": "该分组仍有下级分组或业务系统，请先调整关联"})
+        super().perform_destroy(instance)
 
 
+class TagViewSet(BaseViewSet):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+    search_fields = ("name",)
+    ordering_fields = ("name",)
+    ordering = ("name", "pk")
+
+
+class BusinessSystemViewSet(BaseViewSet):
+    queryset = (
+        BusinessSystem.objects.select_related("group", "department", "owner")
+        .prefetch_related("tags")
+        .annotate(
+            monitor_count=Count("monitors", filter=Q(monitors__is_archived=False), distinct=True)
+        )
+    )
+    serializer_class = BusinessSystemSerializer
+    search_fields = ("name", "code", "description", "group__name", "owner__username")
+    filterset_fields = (
+        "group",
+        "department",
+        "owner",
+        "level",
+        "environment",
+        "is_enabled",
+        "is_archived",
+        "tags",
+    )
+    ordering_fields = ("name", "code", "level", "created_at", "updated_at")
+    ordering = ("name", "pk")
+
+    @extend_schema(
+        responses={200: OpenApiTypes.OBJECT},
+        description="资产表单选项，仅返回分组、部门、负责人及标签的标识和显示名称，不需要组织管理权限。",
+    )
+    @action(detail=False, methods=["get"], url_path="options")
+    def asset_options(self, request):
+        return Response(
+            {
+                "business-groups": list(
+                    BusinessGroup.objects.order_by("sort_order", "name").values(
+                        "id", "name", "parent"
+                    )
+                ),
+                "departments": list(Department.objects.order_by("name").values("id", "name")),
+                "users": list(
+                    User.objects.filter(is_active=True)
+                    .order_by("username")
+                    .values("id", "username")
+                ),
+                "tags": list(Tag.objects.order_by("name").values("id", "name", "color")),
+            }
+        )
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        instance = BusinessSystem.objects.select_for_update().get(pk=instance.pk)
+        if instance.monitors.exists() or instance.chains.exists():
+            raise ValidationError(
+                {"detail": "该业务仍有关联探测任务或业务链路，请先停用、归档或调整关联后再删除"}
+            )
+        super().perform_destroy(instance)
+
+
+@extend_schema(parameters=[ResultFilterInput])
 class MonitorResultViewSet(ReadOnlyBaseViewSet):
     queryset = MonitorResult.objects.select_related("monitor", "monitor__business").all()
     serializer_class = MonitorResultSerializer
@@ -222,15 +363,20 @@ class MonitorResultViewSet(ReadOnlyBaseViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset().filter(monitor__is_archived=False)
-        checked_after = self.request.query_params.get("checked_after")
-        checked_before = self.request.query_params.get("checked_before")
-        monitor_type = self.request.query_params.get("monitor_type")
+        filters = ResultFilterInput(data=dict(self.request.query_params.items()))
+        filters.is_valid(raise_exception=True)
+        checked_after = filters.validated_data.get("checked_after")
+        checked_before = filters.validated_data.get("checked_before")
+        monitor_type = filters.validated_data.get("monitor_type")
         if checked_after:
             qs = qs.filter(checked_at__gte=checked_after)
         if checked_before:
             qs = qs.filter(checked_at__lte=checked_before)
         if monitor_type:
-            qs = qs.filter(monitor__monitor_type=monitor_type)
+            qs = qs.filter(
+                Q(monitor_snapshot__monitor_type=monitor_type)
+                | (Q(monitor_snapshot={}) & Q(monitor__monitor_type=monitor_type))
+            )
         return qs
 
     @action(detail=False, methods=["get"])
@@ -245,9 +391,16 @@ class MonitorResultViewSet(ReadOnlyBaseViewSet):
         )
         total = totals["total"] or 0
         by_type = list(
-            qs.values("monitor__monitor_type")
+            qs.annotate(
+                result_type=Coalesce(
+                    KeyTextTransform("monitor_type", "monitor_snapshot"),
+                    "monitor__monitor_type",
+                    output_field=TextField(),
+                )
+            )
+            .values("result_type")
             .annotate(total=Count("id"), failed=Count("id", filter=Q(success=False)))
-            .order_by("monitor__monitor_type")
+            .order_by("result_type")
         )
         errors = list(
             qs.filter(success=False)
@@ -261,7 +414,7 @@ class MonitorResultViewSet(ReadOnlyBaseViewSet):
                 "success_rate": round((totals["passed"] or 0) / total * 100, 2) if total else None,
                 "by_type": [
                     {
-                        "type": row["monitor__monitor_type"],
+                        "type": row["result_type"],
                         "total": row["total"],
                         "failed": row["failed"],
                     }
@@ -282,6 +435,10 @@ ChainEdgeViewSet = make_viewset(ChainEdge, ChainEdgeSerializer, (), ("chain", "s
 
 
 class MaintenanceWindowViewSet(BaseViewSet):
+    @action(detail=False, methods=["get"])
+    def options(self, request):
+        return Response(report_scope_options())
+
     queryset = MaintenanceWindow.objects.prefetch_related("businesses", "monitors").all()
     serializer_class = MaintenanceWindowSerializer
     search_fields = ("name", "reason", "businesses__name", "monitors__name")
@@ -298,7 +455,11 @@ class MaintenanceWindowViewSet(BaseViewSet):
         elif state == "UPCOMING":
             qs = qs.filter(is_enabled=True, start_at__gt=now)
         elif state == "ENDED":
-            qs = qs.filter(end_at__lt=now)
+            qs = qs.filter(is_enabled=True, end_at__lt=now)
+        elif state == "DISABLED":
+            qs = qs.filter(is_enabled=False)
+        elif state:
+            raise ValidationError({"state": "无效的维护状态"})
         return qs.distinct()
 
 
@@ -378,9 +539,7 @@ def system_overview(request):
                 "failed_notifications": NotificationLog.objects.filter(status="FAILED").count(),
                 "audit_logs": AuditLog.objects.count(),
             },
-            "retention": {
-                "monitor_results": SystemSetting.load().monitor_result_retention_count
-            },
+            "retention": {"monitor_results": SystemSetting.load().monitor_result_retention_count},
             "permissions": {"can_manage": "system.manage" in user_permissions(request.user)},
         }
     )
@@ -451,7 +610,10 @@ def system_settings(request):
         for field, (max_length, label) in text_fields.items():
             if field not in request.data:
                 continue
-            value = str(request.data[field]).strip()
+            if not isinstance(request.data[field], str):
+                errors[field] = f"{label}必须为文本"
+                continue
+            value = request.data[field].strip()
             if not value:
                 errors[field] = f"{label}不能为空"
             elif len(value) > max_length:
@@ -463,7 +625,10 @@ def system_settings(request):
             if field not in request.data:
                 continue
             try:
-                value = int(request.data[field])
+                raw = request.data[field]
+                if isinstance(raw, bool) or not isinstance(raw, int | str):
+                    raise ValueError
+                value = int(raw)
             except (TypeError, ValueError):
                 errors[field] = f"{label}必须为整数"
                 continue
@@ -503,6 +668,7 @@ def system_settings(request):
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(["GET"])
+@authentication_classes([])
 @permission_classes([AllowAny])
 def public_branding(request):
     setting = SystemSetting.load()
@@ -516,7 +682,7 @@ def public_branding(request):
     )
 
 
-class MonitorViewSet(BaseViewSet):
+class MonitorViewSet(MonitorActionsMixin, BaseViewSet):
     queryset = Monitor.objects.select_related("business", "state", "state__last_result").all()
     serializer_class = MonitorSerializer
     search_fields = ("name", "target", "business__name")
@@ -528,31 +694,19 @@ class MonitorViewSet(BaseViewSet):
             return queryset
         return queryset.filter(is_archived=False)
 
+    @transaction.atomic
     def perform_destroy(self, instance):
+        monitor_id = str(instance.pk)
+        delete_monitor(instance.pk)
         AuditLog.objects.create(
             actor=self.request.user,
-            action="ARCHIVE",
+            action="DELETE",
             resource_type="Monitor",
-            resource_id=str(instance.pk),
-            detail={"name": instance.name},
+            resource_id=monitor_id,
+            detail={"permanent": True},
             request_id=getattr(self.request, "request_id", ""),
             source_ip=self.request.META.get("REMOTE_ADDR"),
         )
-        instance.is_enabled = False
-        instance.is_archived = True
-        instance.save(update_fields=["is_enabled", "is_archived", "updated_at"])
-        now = timezone.now()
-        for incident in instance.incidents.filter(status__in=["NEW", "ACKNOWLEDGED", "PROCESSING"]):
-            incident.status = "CLOSED"
-            incident.closed_at = now
-            incident.resolution = "探测任务已删除，事件自动关闭"
-            incident.save(update_fields=["status", "closed_at", "resolution"])
-            IncidentTimeline.objects.create(
-                incident=incident,
-                actor=self.request.user,
-                action="CLOSED",
-                payload={"resolution": incident.resolution, "reason": "MONITOR_ARCHIVED"},
-            )
 
     @action(detail=True, methods=["post"])
     def test(self, request, pk=None):
@@ -565,6 +719,10 @@ class MonitorViewSet(BaseViewSet):
         monitors = self.get_queryset().filter(
             is_enabled=True, business__is_enabled=True, business__is_archived=False
         )
+        if sum(m.timeout_seconds for m in monitors) > 45:
+            raise ValidationError(
+                {"detail": "同步批量探测预计超过请求时限，请使用 run-batch 异步接口"}
+            )
         results = []
         for monitor in monitors:
             result = execute_and_record(monitor)
@@ -591,13 +749,23 @@ class MonitorViewSet(BaseViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-enable")
     def bulk_enable(self, request):
-        ids, enabled = request.data.get("ids", []), bool(request.data.get("enabled", True))
-        updated = (
-            self.get_queryset()
-            .filter(id__in=ids)
-            .update(is_enabled=enabled, next_run_at=timezone.now())
-        )
-        return Response({"updated": updated})
+        serializer = MonitorEnabledInput(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        enabled = serializer.validated_data["enabled"]
+        with transaction.atomic():
+            monitors = selected_monitors(self, serializer.validated_data["ids"])
+            for monitor in monitors:
+                update = MonitorSerializer(monitor, data={"is_enabled": enabled}, partial=True)
+                update.is_valid(raise_exception=True)
+                update.save()
+                AuditLog.objects.create(
+                    actor=request.user,
+                    action="UPDATE",
+                    resource_type="Monitor",
+                    resource_id=str(monitor.pk),
+                    detail={"is_enabled": enabled},
+                )
+        return Response({"updated": len(monitors)})
 
     @action(detail=True, methods=["get"])
     def results(self, request, pk=None):
@@ -606,7 +774,10 @@ class MonitorViewSet(BaseViewSet):
 
     @action(detail=True, methods=["get"])
     def metrics(self, request, pk=None):
-        hours = min(int(request.query_params.get("hours", 24)), 24 * 90)
+        try:
+            hours = max(1, min(int(request.query_params.get("hours", 24)), 24 * 90))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError({"hours": "时间范围必须为整数"}) from exc
         qs = (
             self.get_object()
             .results.filter(checked_at__gte=timezone.now() - timedelta(hours=hours))
@@ -621,14 +792,19 @@ class MonitorViewSet(BaseViewSet):
 
 
 class IncidentViewSet(BaseViewSet):
+    def create(self, request, *args, **kwargs):
+        raise MethodNotAllowed("POST", detail="故障事件由实际探测自动生成")
+
     queryset = Incident.objects.select_related("monitor", "monitor__business").all()
     serializer_class = IncidentSerializer
     filterset_fields = ("status", "severity", "monitor")
     search_fields = ("number", "title", "summary")
 
     @action(detail=True, methods=["post"])
+    @transaction.atomic
     def acknowledge(self, request, pk=None):
         incident = self.get_object()
+        incident = Incident.objects.select_for_update().get(pk=incident.pk)
         if incident.status == "NEW":
             incident.status, incident.acknowledged_at = "ACKNOWLEDGED", timezone.now()
             incident.save(update_fields=["status", "acknowledged_at"])
@@ -638,8 +814,10 @@ class IncidentViewSet(BaseViewSet):
         return Response(self.get_serializer(incident).data)
 
     @action(detail=True, methods=["post"])
+    @transaction.atomic
     def process(self, request, pk=None):
         incident = self.get_object()
+        incident = Incident.objects.select_for_update().get(pk=incident.pk)
         if incident.status not in ("NEW", "ACKNOWLEDGED"):
             raise ValidationError({"status": "只有新建或已确认事件可以转为处理中"})
         incident.status = "PROCESSING"
@@ -654,8 +832,10 @@ class IncidentViewSet(BaseViewSet):
         return Response(self.get_serializer(incident).data)
 
     @action(detail=True, methods=["post"])
+    @transaction.atomic
     def close(self, request, pk=None):
         incident = self.get_object()
+        incident = Incident.objects.select_for_update().get(pk=incident.pk)
         resolution = str(request.data.get("resolution", "")).strip()
         if not resolution:
             raise ValidationError({"resolution": "关闭事件时必须填写解决说明"})
@@ -664,8 +844,11 @@ class IncidentViewSet(BaseViewSet):
         incident.status = "CLOSED"
         incident.closed_at = timezone.now()
         incident.resolution = resolution
-        incident.root_cause = request.data.get("root_cause", incident.root_cause)
-        incident.save()
+        root_cause = request.data.get("root_cause", incident.root_cause)
+        if not isinstance(root_cause, str):
+            raise ValidationError({"root_cause": "根因必须为文本"})
+        incident.root_cause = root_cause
+        incident.save(update_fields=["status", "closed_at", "resolution", "root_cause"])
         IncidentTimeline.objects.create(
             incident=incident,
             action="CLOSED",
@@ -676,6 +859,19 @@ class IncidentViewSet(BaseViewSet):
 
 
 class AlertRuleViewSet(BaseViewSet):
+    @action(detail=False, methods=["get"])
+    def options(self, request):
+        return Response(
+            {
+                "monitors": list(
+                    Monitor.objects.filter(is_archived=False).values("id", "name", "is_enabled")
+                ),
+                "channels": list(
+                    NotificationChannel.objects.values("id", "name", "channel_type", "is_enabled")
+                ),
+            }
+        )
+
     queryset = AlertRule.objects.prefetch_related("monitors", "channels").all()
     serializer_class = AlertRuleSerializer
     search_fields = ("name",)
@@ -684,7 +880,9 @@ class AlertRuleViewSet(BaseViewSet):
     @action(detail=True, methods=["post"])
     def toggle(self, request, pk=None):
         rule = self.get_object()
-        rule.is_enabled = bool(request.data.get("enabled", not rule.is_enabled))
+        rule.is_enabled = serializers.BooleanField().run_validation(
+            request.data.get("enabled", not rule.is_enabled)
+        )
         rule.save(update_fields=["is_enabled"])
         return Response(self.get_serializer(rule).data)
 
@@ -703,8 +901,22 @@ class NotificationLogViewSet(ReadOnlyBaseViewSet):
     ordering = ("-created_at",)
 
     @action(detail=True, methods=["post"])
+    @transaction.atomic
     def retry(self, request, pk=None):
         log = self.get_object()
+        log = (
+            NotificationLog.objects.select_for_update()
+            .select_related("incident", "channel")
+            .get(pk=log.pk)
+        )
+        if log.status != "FAILED":
+            raise ValidationError({"status": "仅失败通知允许重试"})
+        if log.phase in ("OPEN", "REPEAT") and log.incident.status not in (
+            "NEW",
+            "ACKNOWLEDGED",
+            "PROCESSING",
+        ):
+            raise ValidationError({"status": "事件已恢复或关闭，不能重发故障通知"})
         if not log.channel.is_enabled:
             raise ValidationError({"channel": "通知渠道已停用，无法重试"})
         result = send_notification(
@@ -724,6 +936,15 @@ class NotificationLogViewSet(ReadOnlyBaseViewSet):
 
 
 class NotificationChannelViewSet(BaseViewSet):
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        if (
+            NotificationLog.objects.filter(channel=instance).exists()
+            or AlertRule.objects.filter(channels=instance).exists()
+        ):
+            raise ValidationError({"channel": "渠道被规则或发送记录引用，请先停用，不能删除"})
+        super().perform_destroy(instance)
+
     queryset = NotificationChannel.objects.all()
     serializer_class = NotificationChannelSerializer
     search_fields = ("name",)
@@ -767,6 +988,16 @@ class NotificationChannelViewSet(BaseViewSet):
 
 
 class StatusPageViewSet(BaseViewSet):
+    @action(detail=False, methods=["get"])
+    def options(self, request):
+        return Response(report_scope_options())
+
+    @action(detail=True, methods=["get"])
+    def preview(self, request, pk=None):
+        response = Response(status_page_data(self.get_object()))
+        response["Cache-Control"] = "no-store"
+        return response
+
     queryset = StatusPage.objects.prefetch_related("businesses", "monitors").all()
     serializer_class = StatusPageSerializer
     search_fields = ("name", "slug")
@@ -791,7 +1022,7 @@ class StatusPageViewSet(BaseViewSet):
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT})
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([HasMonitorViewPermission])
 def dashboard_summary(request):
     since_24h = timezone.now() - timedelta(hours=24)
     probe_stats = MonitorResult.objects.filter(
@@ -815,9 +1046,8 @@ def dashboard_summary(request):
     for monitor in monitors:
         state = getattr(monitor, "state", None)
         result = getattr(state, "last_result", None)
-        status = "PAUSED" if not monitor.is_enabled else getattr(state, "status", "PENDING")
-        if result is not None and not result.success and status not in ("DOWN", "MAINTENANCE"):
-            status = "DEGRADED"
+        display = MonitorSerializer()
+        status = display.get_current_status(monitor)
         counts[status] += 1
         latest_monitors.append(
             {
@@ -826,7 +1056,7 @@ def dashboard_summary(request):
                 "business": monitor.business.name,
                 "type": monitor.monitor_type,
                 "status": status,
-                "available": result.success if result is not None and monitor.is_enabled else None,
+                "available": display.get_service_available(monitor),
                 "last_checked_at": result.checked_at if result else None,
                 "latency_ms": result.latency_ms if result else None,
                 "error_summary": result.error_summary if result and not result.success else "",
@@ -879,22 +1109,27 @@ def dashboard_summary(request):
     )
 
 
-@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@extend_schema(parameters=[SlaQuerySerializer], responses={200: OpenApiTypes.OBJECT})
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([HasReportViewPermission])
 def sla_report(request):
-    try:
-        days = max(1, min(int(request.query_params.get("days", 30)), 365))
-    except (TypeError, ValueError) as exc:
-        raise ValidationError({"days": "统计周期必须为 1 到 365 天"}) from exc
-    since = timezone.now() - timedelta(days=days)
+    return Response(build_sla_report(request))
+
+
+def build_sla_report(request):
+    params = SlaQuerySerializer(data=request.query_params)
+    params.is_valid(raise_exception=True)
+    days = params.validated_data["days"]
+    until = timezone.now()
+    since = until - timedelta(days=days)
     data = []
     monitors = Monitor.objects.select_related("business").filter(is_archived=False)
-    if business_id := request.query_params.get("business"):
+    monitors = monitors.order_by("business__name", "name", "id")
+    if business_id := params.validated_data.get("business"):
         monitors = monitors.filter(business_id=business_id)
     total_samples = included_samples = passed_samples = 0
     for monitor in monitors:
-        qs = monitor.results.filter(checked_at__gte=since)
+        qs = monitor.results.filter(checked_at__gte=since, checked_at__lte=until)
         total_before_exclusion = qs.count()
         windows = (
             MaintenanceWindow.objects.filter(
@@ -908,8 +1143,12 @@ def sla_report(request):
             exclusion |= Q(checked_at__gte=window.start_at, checked_at__lte=window.end_at)
         if exclusion:
             qs = qs.exclude(exclusion)
-        total = qs.count()
-        up = qs.filter(success=True).count()
+        counts = qs.aggregate(
+            total=Count("id"),
+            up=Count("id", filter=Q(success=True)),
+            latency=Avg("latency_ms", filter=Q(success=True)),
+        )
+        total, up = counts["total"], counts["up"]
         total_samples += total_before_exclusion
         included_samples += total
         passed_samples += up
@@ -921,45 +1160,58 @@ def sla_report(request):
                 "availability": round(up / total * 100, 4) if total else None,
                 "samples": total,
                 "excluded_samples": total_before_exclusion - total,
-                "average_latency_ms": qs.filter(success=True).aggregate(v=Avg("latency_ms"))["v"],
+                "average_latency_ms": counts["latency"],
                 "sla_target": monitor.business.sla_target,
                 "target_met": (up / total * 100) >= float(monitor.business.sla_target)
                 if total
                 else None,
             }
         )
-    return Response(
-        {
-            "period_days": days,
-            "generated_at": timezone.now(),
-            "formula": "成功样本数 /（总样本数 - SLA 排除维护期样本数）× 100%",
-            "summary": {
-                "monitors": len(data),
-                "total_samples": total_samples,
-                "included_samples": included_samples,
-                "excluded_samples": total_samples - included_samples,
-                "availability": round(passed_samples / included_samples * 100, 4)
-                if included_samples
-                else None,
-                "targets_met": sum(1 for row in data if row["target_met"] is True),
-            },
-            "results": data,
-        }
-    )
+    return {
+        "period_days": days,
+        "start_at": since,
+        "end_at": until,
+        "data_note": (
+            "仅统计当前保留的实际探测样本；无样本不视为成功，可用率按样本数计算，并非时长可用率。"
+        ),
+        "generated_at": timezone.now(),
+        "formula": "成功样本数 /（总样本数 - SLA 排除维护期样本数）× 100%",
+        "summary": {
+            "monitors": len(data),
+            "total_samples": total_samples,
+            "included_samples": included_samples,
+            "excluded_samples": total_samples - included_samples,
+            "availability": round(passed_samples / included_samples * 100, 4)
+            if included_samples
+            else None,
+            "targets_met": sum(1 for row in data if row["target_met"] is True),
+        },
+        "results": data,
+    }
 
 
 @extend_schema(responses={200: OpenApiTypes.OBJECT, 404: OpenApiTypes.OBJECT})
 @api_view(["GET"])
 @permission_classes([AllowAny])
+@authentication_classes([])
 @throttle_classes([AnonRateThrottle])
 def public_status(request, slug):
     page = StatusPage.objects.filter(slug=slug, is_enabled=True).first()
     if not page:
         return Response({"detail": "状态页不存在"}, status=404)
-    if page.access_mode == "TOKEN" and not secrets.compare_digest(
-        page.token_hash, hashlib.sha256(request.query_params.get("token", "").encode()).hexdigest()
+    token = request.headers.get("X-Status-Token") or request.query_params.get("token", "")
+    if page.access_mode == "TOKEN" and (
+        not page.token_hash
+        or not secrets.compare_digest(page.token_hash, hashlib.sha256(token.encode()).hexdigest())
     ):
-        return Response({"detail": "访问令牌无效"}, status=403)
+        response = Response({"detail": "访问令牌无效"}, status=403)
+    else:
+        response = Response(status_page_data(page))
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+def status_page_data(page):
     monitors = (
         Monitor.objects.select_related("state", "state__last_result", "business")
         .filter(
@@ -970,48 +1222,70 @@ def public_status(request, slug):
         .order_by("business__name", "name")
     )
     monitor_rows = []
+    current = timezone.now()
+    maintenance_ids = set()
+    windows = MaintenanceWindow.objects.filter(
+        is_enabled=True, start_at__lte=current, end_at__gte=current
+    ).prefetch_related("monitors", "businesses")
+    direct_ids = set()
+    business_ids = set()
+    for window in windows:
+        direct_ids.update(item.pk for item in window.monitors.all())
+        business_ids.update(item.pk for item in window.businesses.all())
+    maintenance_ids = direct_ids
     for monitor in monitors:
         state = getattr(monitor, "state", None)
         result = getattr(state, "last_result", None)
+        display_status = MonitorSerializer().get_current_status(monitor)
+        if result is None and display_status == "UP":
+            display_status = "PENDING"
+        if display_status != "PAUSED" and (
+            monitor.pk in maintenance_ids or monitor.business_id in business_ids
+        ):
+            display_status = "MAINTENANCE"
+        elif display_status == "MAINTENANCE":
+            display_status = "PENDING" if result is None else "UP" if result.success else "DEGRADED"
         monitor_rows.append(
             {
                 "id": monitor.id,
                 "name": monitor.name,
                 "business": monitor.business.name,
                 "type": monitor.monitor_type,
-                "status": "PAUSED"
-                if not monitor.is_enabled
-                else getattr(state, "status", "UNKNOWN"),
+                "status": display_status,
                 "last_checked_at": result.checked_at if result else None,
                 "latency_ms": result.latency_ms if result else None,
             }
         )
-    failing = sum(1 for row in monitor_rows if row["status"] in ("DOWN", "DEGRADED"))
-    return Response(
-        {
-            "name": page.name,
-            "description": page.description,
-            "theme_color": page.theme_color,
-            "updated_at": timezone.now(),
-            "overall_status": "DOWN"
-            if any(row["status"] == "DOWN" for row in monitor_rows)
-            else "DEGRADED"
-            if failing
-            else "UP",
-            "summary": {"total": len(monitor_rows), "affected": failing},
-            "monitors": monitor_rows,
-        }
+    statuses = {row["status"] for row in monitor_rows}
+    overall = next(
+        (
+            status
+            for status in ("DOWN", "DEGRADED", "UNKNOWN", "PENDING", "MAINTENANCE", "PAUSED")
+            if status in statuses
+        ),
+        "UP" if statuses else "UNKNOWN",
     )
+    failing = sum(1 for row in monitor_rows if row["status"] in ("DOWN", "DEGRADED"))
+    return {
+        "name": page.name,
+        "description": page.description,
+        "theme_color": page.theme_color,
+        "updated_at": timezone.now(),
+        "overall_status": overall,
+        "summary": {"total": len(monitor_rows), "affected": failing},
+        "monitors": monitor_rows,
+    }
 
 
-@extend_schema(responses={200: OpenApiTypes.BINARY})
+@extend_schema(parameters=[SlaQuerySerializer], responses={200: OpenApiTypes.BINARY})
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([HasReportViewPermission])
 def sla_export(request):
-    response = HttpResponse(content_type="text/csv; charset=utf-8-sig")
+    response = HttpResponse(content_type="text/csv; charset=utf-8")
     response["Content-Disposition"] = 'attachment; filename="sla.csv"'
+    response.write("\ufeff")
     writer = csv.writer(response)
-    report = sla_report(request).data
+    report = build_sla_report(request)
     writer.writerow(
         [
             "业务",
@@ -1027,14 +1301,43 @@ def sla_export(request):
     for row in report["results"]:
         writer.writerow(
             [
-                row["business_name"],
-                row["monitor_name"],
+                csv_safe(row["business_name"]),
+                csv_safe(row["monitor_name"]),
                 row["sla_target"],
                 row["availability"] if row["availability"] is not None else "",
                 "是" if row["target_met"] else "否" if row["target_met"] is False else "无数据",
                 row["samples"],
                 row["excluded_samples"],
-                row["average_latency_ms"] or "",
+                row["average_latency_ms"] if row["average_latency_ms"] is not None else "",
             ]
         )
     return response
+
+
+def csv_safe(value):
+    text = str(value)
+    return (
+        "'" + text
+        if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n"))
+        else text
+    )
+
+
+def report_scope_options():
+    return {
+        "businesses": list(
+            BusinessSystem.objects.filter(is_archived=False).order_by("name").values("id", "name")
+        ),
+        "monitors": list(
+            Monitor.objects.filter(is_archived=False, business__is_archived=False)
+            .order_by("name")
+            .values("id", "name", "business_id", "is_enabled")
+        ),
+    }
+
+
+@extend_schema(responses={200: OpenApiTypes.OBJECT})
+@api_view(["GET"])
+@permission_classes([HasReportViewPermission])
+def report_options(request):
+    return Response(report_scope_options())

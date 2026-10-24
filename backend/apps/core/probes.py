@@ -6,7 +6,7 @@ import ssl
 import subprocess
 import time
 from datetime import UTC, datetime
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import dns.resolver
 import httpx
@@ -17,6 +17,7 @@ from jsonpath_ng import parse as jsonpath_parse
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure, ServerSelectionTimeoutError
 
+from .monitor_config import SECRET_HEADERS, host_port, read_query
 from .secrets import decrypt_secret
 
 ERRORS = (
@@ -90,7 +91,10 @@ def _validated_url(value):
 
 
 def _prepare_auth(config, headers, params):
-    auth_config = config.get("auth") or {}
+    auth_config = dict(config.get("auth") or {})
+    for key in ("token", "password", "value", "client_secret"):
+        if auth_config.get(key):
+            auth_config[key] = decrypt_secret(auth_config[key])
     auth_type = str(auth_config.get("type", "none")).lower()
     request_auth = None
     if auth_type in ("", "none"):
@@ -138,23 +142,60 @@ def http_probe(target, config):
     assertions = []
     try:
         _validated_url(target)
-        headers = dict(config.get("headers", {}))
+        headers = {
+            k: decrypt_secret(v) if k.lower() in SECRET_HEADERS else v
+            for k, v in (config.get("headers") or {}).items()
+        }
         params = dict(config.get("params") or {})
         request_auth = _prepare_auth(config, headers, params)
-        sensitive = {"authorization", "cookie"}
-        response = httpx.request(
-            str(config.get("method", "GET")).upper(),
-            target,
-            headers=headers,
-            params=params,
-            json=config.get("json"),
-            data=config.get("form"),
-            content=config.get("body"),
-            auth=request_auth,
-            timeout=float(config.get("timeout", 10)),
-            follow_redirects=bool(config.get("follow_redirects", True)),
-            verify=bool(config.get("verify_tls", True)),
-        )
+        sensitive = SECRET_HEADERS | {"set-cookie"}
+        method = str(config.get("method", "GET")).upper()
+        request_options = {
+            "headers": headers,
+            "params": params,
+            "auth": request_auth,
+            "json": config.get("json"),
+            "data": config.get("form"),
+            "content": config.get("body"),
+            "timeout": float(config.get("timeout", 10)),
+            "follow_redirects": False,
+            "verify": bool(config.get("verify_tls", True)),
+        }
+        current_url = target
+        for redirect_count in range(11):
+            _validated_url(current_url)
+            remaining = float(config.get("timeout", 10)) - (time.monotonic() - started)
+            if remaining <= 0:
+                raise httpx.ReadTimeout("deadline")
+            request_options["timeout"] = remaining
+            response = httpx.request(method, current_url, **request_options)
+            if not (
+                config.get("follow_redirects", True)
+                and response.is_redirect
+                and response.headers.get("location")
+            ):
+                break
+            if redirect_count == 10:
+                raise ValueError("重定向次数超过限制")
+            next_url = urljoin(str(response.url), response.headers["location"])
+            old, new = urlparse(current_url), _validated_url(next_url)
+            request_options["params"] = None
+            if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
+                request_options["auth"] = None
+                request_options["headers"] = {
+                    key: value
+                    for key, value in headers.items()
+                    if key.lower()
+                    not in SECRET_HEADERS
+                    | {"host", str((config.get("auth") or {}).get("name", "")).lower()}
+                }
+            if response.status_code == 303 or (
+                response.status_code in (301, 302) and method == "POST"
+            ):
+                method = "GET"
+                for key in ("json", "data", "content"):
+                    request_options[key] = None
+            current_url = next_url
         expected = config.get("expected_status")
         expected = list(range(200, 300)) if expected is None else expected
         expected = [expected] if isinstance(expected, int) else list(expected)
@@ -195,7 +236,9 @@ def http_probe(target, config):
             error_type=None if success else ("AUTH_ERROR" if auth_failed else "ASSERTION_FAILED"),
             error_summary=None if success else ("接口认证失败" if auth_failed else "响应断言失败"),
             detail={
-                "final_url": str(response.url),
+                "final_url": str(
+                    response.url.copy_with(query=None, fragment=None, username=None, password=None)
+                ),
                 "headers": {
                     k: v for k, v in response.headers.items() if k.lower() not in sensitive
                 },
@@ -229,15 +272,33 @@ def http_probe(target, config):
 def tcp_probe(target, config):
     started = time.monotonic()
     try:
-        host, port = target.rsplit(":", 1)
-        port = int(port)
+        host, port = host_port(target)
         validate_target(host, port)
         with socket.create_connection(
             (host, port), timeout=float(config.get("timeout", 10))
         ) as sock:
             if config.get("send"):
-                sock.sendall(config["send"].encode())
-            received = sock.recv(4096).decode(errors="replace") if config.get("expect") else ""
+                content = config["send"]
+                if config.get("send_escapes"):
+                    content = re.sub(
+                        r"\\([rnt\\])",
+                        lambda m: {"r": "\r", "n": "\n", "t": "\t", "\\": "\\"}[m[1]],
+                        content,
+                    )
+                sock.sendall(content.encode())
+            received = b""
+            limit = int(config.get("receive_bytes", 4096))
+            expected = str(config.get("expect", "")).encode()
+            while expected and expected not in received and len(received) < limit:
+                remaining = float(config.get("timeout", 10)) - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise TimeoutError
+                sock.settimeout(remaining)
+                part = sock.recv(min(4096, limit - len(received)))
+                if not part:
+                    break
+                received += part
+            received = received.decode(errors="replace")
         ok = not config.get("expect") or config["expect"] in received
         return _result(
             ok,
@@ -295,8 +356,7 @@ def dns_probe(target, config):
 def ssl_probe(target, config):
     started = time.monotonic()
     try:
-        host, port = target.rsplit(":", 1) if ":" in target else (target, "443")
-        port = int(port)
+        host, port = host_port(target, 443)
         validate_target(host, port)
         context = ssl.create_default_context()
         with socket.create_connection(
@@ -308,7 +368,9 @@ def ssl_probe(target, config):
         expires = datetime.strptime(info["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=UTC)
         days = (expires - datetime.now(UTC)).days
         warn = int(config.get("warn_days", 30))
-        ok = days > 0
+        ok = expires > datetime.now(UTC) and not (
+            days <= warn and config.get("expiry_action") == "fail"
+        )
         return _result(
             ok,
             started,
@@ -320,7 +382,7 @@ def ssl_probe(target, config):
                 "not_after": expires.isoformat(),
             },
             error_type=None if ok else "TLS_ERROR",
-            error_summary=None if ok else "证书已过期",
+            error_summary=None if ok else "证书已到期或进入配置的到期预警期",
         )
     except ValueError as e:
         return _result(False, started, error_type="INVALID_TARGET", error_summary=str(e))
@@ -337,17 +399,30 @@ def ping_probe(target, config):
         count = min(max(int(config.get("count", 3)), 1), 10)
         timeout = max(int(config.get("timeout", 5)), 1)
         proc = subprocess.run(
-            ["ping", "-c", str(count), "-W", str(timeout), target],
+            [
+                "ping",
+                "-n",
+                "-c",
+                str(count),
+                "-i",
+                "0.2",
+                "-w",
+                str(timeout),
+                "-W",
+                str(timeout),
+                "--",
+                target,
+            ],
             capture_output=True,
             text=True,
-            timeout=timeout * count + 2,
+            timeout=timeout + 2,
             check=False,
         )
         match = re.search(r"(\d+(?:\.\d+)?)% packet loss", proc.stdout)
         loss = float(match.group(1)) if match else 100.0
         latency = re.search(r"= [\d.]+/([\d.]+)/", proc.stdout)
         avg = float(latency.group(1)) if latency else None
-        ok = proc.returncode == 0
+        ok = proc.returncode in (0, 1) and loss <= float(config.get("max_packet_loss", 0))
         result = _result(
             ok,
             started,
@@ -368,13 +443,7 @@ DATABASE_PORTS = {"MSSQL": 1433, "POSTGRESQL": 5432, "MYSQL": 3306, "MONGODB": 2
 
 
 def _database_target(target, kind):
-    host, separator, raw_port = str(target).strip().rpartition(":")
-    if separator and host and raw_port.isdigit():
-        port = int(raw_port)
-    else:
-        host, port = str(target).strip(), DATABASE_PORTS[kind]
-    if not host or not 1 <= port <= 65535:
-        raise ValueError("数据库目标格式无效，请输入 主机:端口")
+    host, port = host_port(target, DATABASE_PORTS[kind])
     validate_target(host, port)
     return host, port
 
@@ -388,9 +457,11 @@ def database_probe(kind, target, config):
         username = str(config.get("username", ""))
         password = decrypt_secret(config.get("password", ""))
         database = str(config.get("database", ""))
-        if not username or not database:
+        auth_enabled = not (kind == "MONGODB" and config.get("auth_enabled") is False)
+        if not database or (auth_enabled and (not username or not password)):
             raise ValueError("数据库名称和登录用户名不能为空")
 
+        query = read_query(config.get("query", "SELECT 1")) if kind != "MONGODB" else None
         if kind == "POSTGRESQL":
             connection = psycopg.connect(
                 host=host,
@@ -400,10 +471,13 @@ def database_probe(kind, target, config):
                 password=password,
                 connect_timeout=timeout,
                 sslmode=str(config.get("sslmode", "prefer")),
+                options=(
+                    f"-c statement_timeout={timeout * 1000} -c default_transaction_read_only=on"
+                ),
             )
             query_started = time.monotonic()
             with connection.cursor() as cursor:
-                cursor.execute(str(config.get("query", "SELECT 1")))
+                cursor.execute(query)
                 value = cursor.fetchone()
         elif kind == "MYSQL":
             connection = pymysql.connect(
@@ -416,11 +490,11 @@ def database_probe(kind, target, config):
                 read_timeout=timeout,
                 write_timeout=timeout,
                 charset="utf8mb4",
-                ssl={} if config.get("use_tls") else None,
+                ssl=ssl.create_default_context() if config.get("use_tls") else None,
             )
             query_started = time.monotonic()
             with connection.cursor() as cursor:
-                cursor.execute(str(config.get("query", "SELECT 1")))
+                cursor.execute(query)
                 value = cursor.fetchone()
         elif kind == "MSSQL":
             connection = pymssql.connect(
@@ -435,15 +509,17 @@ def database_probe(kind, target, config):
             )
             query_started = time.monotonic()
             cursor = connection.cursor()
-            cursor.execute(str(config.get("query", "SELECT 1")))
+            cursor.execute(query)
             value = cursor.fetchone()
             cursor.close()
         else:
             client = MongoClient(
                 host=host,
                 port=port,
-                username=username,
-                password=password,
+                username=username if auth_enabled else None,
+                password=password if auth_enabled else None,
+                socketTimeoutMS=timeout * 1000,
+                timeoutMS=timeout * 1000,
                 authSource=str(config.get("auth_source", "admin")),
                 serverSelectionTimeoutMS=timeout * 1000,
                 connectTimeoutMS=timeout * 1000,
@@ -458,7 +534,7 @@ def database_probe(kind, target, config):
         connection_time_ms = round((query_started - started) * 1000, 2)
         expected = config.get("expected_value")
         actual = value[0] if isinstance(value, tuple | list) and value else value
-        ok = expected is None or str(actual) == str(expected)
+        ok = expected in (None, "") or str(actual) == str(expected)
         return _result(
             ok,
             started,
@@ -475,6 +551,7 @@ def database_probe(kind, target, config):
                 "port": port,
                 "database": database,
                 "query_time_ms": query_time_ms,
+                "query_result": str(actual)[:200],
             },
             error_type=None if ok else "ASSERTION_FAILED",
             error_summary=None if ok else "数据库查询结果与期望值不一致",

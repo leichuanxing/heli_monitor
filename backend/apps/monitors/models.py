@@ -56,6 +56,7 @@ class Monitor(models.Model):
 
 class MonitorResult(models.Model):
     monitor = models.ForeignKey(Monitor, on_delete=models.CASCADE, related_name="results")
+    monitor_snapshot = models.JSONField(default=dict, db_default={}, blank=True, editable=False)
     execution_key = models.CharField(max_length=128, unique=True)
     scheduled_at = models.DateTimeField()
     started_at = models.DateTimeField()
@@ -73,7 +74,10 @@ class MonitorResult(models.Model):
     detail = models.JSONField(default=dict)
 
     class Meta:
-        indexes = [models.Index(fields=["monitor", "-checked_at"])]
+        indexes = [
+            models.Index(fields=["monitor", "-checked_at"]),
+            models.Index(fields=["-checked_at"], name="monitor_result_checked_idx"),
+        ]
 
 
 class MonitorState(models.Model):

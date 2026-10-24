@@ -4,12 +4,14 @@ import hmac
 import re
 import smtplib
 import time
+from copy import deepcopy
 from email.message import EmailMessage
 from urllib.parse import quote_plus, urlparse
 
 import httpx
 
 from .probes import validate_target
+from .secrets import decrypt_secret
 
 
 def _required(config, *names):
@@ -103,7 +105,7 @@ def _webhook(config, subject, content):
     return _post(
         config["url"],
         {
-            "event": "channel.test",
+            "event": config.get("_event", "monitor.alert"),
             "title": subject,
             "content": content,
             "timestamp": int(time.time()),
@@ -147,9 +149,15 @@ def _serverchan(config, subject, content):
     }
 
 
-def send_notification(channel, subject, content):
+def send_notification(channel, subject, content, *, event="monitor.alert"):
     started = time.monotonic()
+    config = {}
     try:
+        config = deepcopy(channel.config or {})
+        for key in ("password", "secret", "sendkey"):
+            if config.get(key):
+                config[key] = decrypt_secret(config[key])
+        config["_event"] = event
         handler = {
             "EMAIL": _email,
             "WECHAT": _wechat,
@@ -159,7 +167,7 @@ def send_notification(channel, subject, content):
         }.get(channel.channel_type)
         if not handler:
             raise ValueError("不支持的通知渠道类型")
-        detail = handler(channel.config or {}, subject, content)
+        detail = handler(config, subject, content)
         return {
             "success": True,
             "message": "消息发送成功",
@@ -169,7 +177,7 @@ def send_notification(channel, subject, content):
     except Exception as exc:
         return {
             "success": False,
-            "message": _safe_error(exc, channel.config or {}),
+            "message": _safe_error(exc, config),
             "latency_ms": round((time.monotonic() - started) * 1000, 2),
             "detail": {},
         }
@@ -183,9 +191,10 @@ def _safe_error(exc, config):
         for key, value in values.items():
             if isinstance(value, dict):
                 redact(value)
-            elif value and any(word in key.lower() for word in (
-                "password", "secret", "token", "key", "authorization", "url"
-            )):
+            elif value and any(
+                word in key.lower()
+                for word in ("password", "secret", "token", "key", "authorization", "url")
+            ):
                 message = message.replace(str(value), "[已隐藏]")
 
     redact(config)
@@ -198,4 +207,5 @@ def send_test_notification(channel):
         channel,
         "[HELI MONITOR] 通知渠道测试",
         f"渠道“{channel.name}”测试成功。收到此消息表示通知链路可用。",
+        event="channel.test",
     )

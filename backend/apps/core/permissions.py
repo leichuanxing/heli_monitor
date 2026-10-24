@@ -32,23 +32,39 @@ PERMISSION_CATALOG = [
 VALID_PERMISSIONS = {code for group in PERMISSION_CATALOG for code, _ in group["items"]}
 
 RESOURCE_GROUPS = {
-    "departments": "iam", "roles": "iam", "users": "iam",
-    "business-groups": "asset", "tags": "asset", "business-systems": "asset",
-    "monitors": "monitor", "monitor-results": "monitor", "business-chains": "monitor",
-    "chain-nodes": "monitor", "chain-edges": "monitor",
-    "incidents": "alert", "alert-rules": "alert", "notification-channels": "alert",
-    "notification-logs": "alert", "maintenance-windows": "report", "status-pages": "report",
+    "departments": "iam",
+    "roles": "iam",
+    "users": "iam",
+    "business-groups": "asset",
+    "tags": "asset",
+    "business-systems": "asset",
+    "monitors": "monitor",
+    "monitor-results": "monitor",
+    "business-chains": "monitor",
+    "chain-nodes": "monitor",
+    "chain-edges": "monitor",
+    "incidents": "alert",
+    "alert-rules": "alert",
+    "notification-channels": "alert",
+    "notification-logs": "alert",
+    "maintenance-windows": "report",
+    "status-pages": "report",
     "audit-logs": "system",
 }
 
 
 def user_permissions(user):
-    if not user or not user.is_authenticated:
+    if not user or not user.is_authenticated or not user.is_active:
         return set()
     if user.is_superuser:
         return VALID_PERMISSIONS
     roles = user.business_roles.filter(is_enabled=True)
-    result = {item for role in roles for item in (role.permissions or [])}
+    result = {
+        item
+        for role in roles
+        for item in (role.permissions or [])
+        if isinstance(item, str) and item in VALID_PERMISSIONS
+    }
     legacy = set(roles.values_list("code", flat=True))
     if legacy & {"SUPER_ADMIN", "ADMIN"}:
         return VALID_PERMISSIONS
@@ -59,7 +75,7 @@ def user_permissions(user):
 
 class HasResourcePermission(BasePermission):
     def has_permission(self, request, view):
-        if not request.user.is_authenticated:
+        if not request.user.is_authenticated or not request.user.is_active:
             return False
         if request.user.is_superuser:
             return True
@@ -81,3 +97,13 @@ class HasSystemViewPermission(BasePermission):
 class HasSystemManagePermission(BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and "system.manage" in user_permissions(request.user)
+
+
+class HasMonitorViewPermission(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and "monitor.view" in user_permissions(request.user)
+
+
+class HasReportViewPermission(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and "report.view" in user_permissions(request.user)

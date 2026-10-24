@@ -5,7 +5,7 @@ import client from './client'
 afterEach(() => { vi.restoreAllMocks(); localStorage.clear() })
 
 describe('authenticated API client', () => {
-  it('shares refresh across concurrent failures and saves the rotated refresh token', async () => {
+  it('refreshes account permissions and shares concurrent refresh failures', async () => {
     localStorage.setItem('access_token', 'expired')
     localStorage.setItem('refresh_token', 'original-refresh')
     const refresh = vi.spyOn(axios, 'post').mockResolvedValue({ data: { access: 'renewed', refresh: 'rotated' } })
@@ -16,7 +16,7 @@ describe('authenticated API client', () => {
       }
       return { data: { ok: true }, status: 200, statusText: 'OK', headers: new AxiosHeaders(), config }
     })
-    const responses = await Promise.all([client.get('/monitors/', { adapter }), client.get('/incidents/', { adapter })])
+    const responses = await Promise.all([client.get('/monitors/', { adapter }), client.get('/auth/me/', { adapter })])
     expect(responses.every(response => response.data.ok)).toBe(true)
     expect(refresh).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem('refresh_token')).toBe('rotated')

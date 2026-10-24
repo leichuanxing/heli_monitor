@@ -124,7 +124,7 @@ REST_FRAMEWORK = {
     "DEFAULT_FILTER_BACKENDS": (
         "django_filters.rest_framework.DjangoFilterBackend",
         "rest_framework.filters.SearchFilter",
-        "rest_framework.filters.OrderingFilter",
+        "apps.core.filters.ModelOrderingFilter",
     ),
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.StandardPagination",
     "PAGE_SIZE": 20,
@@ -135,11 +135,12 @@ SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.getenv("JWT_ACCESS_MINUTES", "15"))),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.getenv("JWT_REFRESH_DAYS", "7"))),
     "ROTATE_REFRESH_TOKENS": True,
+    "CHECK_REVOKE_TOKEN": True,
     "BLACKLIST_AFTER_ROTATION": True,
 }
 SPECTACULAR_SETTINGS = {
     "TITLE": "合力数据业务监控系统 API",
-    "VERSION": "0.1.0",
+    "VERSION": "1.0.2",
     "SERVE_INCLUDE_SCHEMA": False,
 }
 SECURE_CONTENT_TYPE_NOSNIFF = True

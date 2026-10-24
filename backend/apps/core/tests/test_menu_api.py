@@ -23,10 +23,23 @@ def api():
 @pytest.mark.django_db
 def test_every_menu_endpoint_is_available(api):
     endpoints = [
-        "departments", "roles", "users", "business-groups", "tags",
-        "business-systems", "monitors", "monitor-results", "business-chains",
-        "incidents", "alert-rules", "notification-channels", "notification-logs",
-        "maintenance-windows", "status-pages", "audit-logs", "login-records",
+        "departments",
+        "roles",
+        "users",
+        "business-groups",
+        "tags",
+        "business-systems",
+        "monitors",
+        "monitor-results",
+        "business-chains",
+        "incidents",
+        "alert-rules",
+        "notification-channels",
+        "notification-logs",
+        "maintenance-windows",
+        "status-pages",
+        "audit-logs",
+        "login-records",
     ]
     for endpoint in endpoints:
         assert api.get(f"/api/v1/{endpoint}/").status_code == 200, endpoint
@@ -118,9 +131,12 @@ def test_system_maintenance_requires_manage_permission(api):
     readonly = APIClient()
     readonly.force_authenticate(viewer)
     assert readonly.get("/api/v1/system/overview/").status_code == 200
-    assert readonly.post(
-        "/api/v1/system/maintenance/", {"operation": "cleanup_results"}, format="json"
-    ).status_code == 403
+    assert (
+        readonly.post(
+            "/api/v1/system/maintenance/", {"operation": "cleanup_results"}, format="json"
+        ).status_code
+        == 403
+    )
     with patch("apps.core.api.cleanup_monitor_results.delay") as delay:
         delay.return_value.id = "task-1"
         response = api.post(
@@ -187,9 +203,7 @@ def test_all_monitor_types_can_be_created_edited_and_tested(api):
 
 @pytest.mark.django_db
 def test_crud_forms_and_key_actions(api):
-    department = api.post(
-        "/api/v1/departments/", {"name": "测试部门", "code": "QA"}, format="json"
-    )
+    department = api.post("/api/v1/departments/", {"name": "测试部门", "code": "QA"}, format="json")
     assert department.status_code == 201
     tag = api.post("/api/v1/tags/", {"name": "核心", "color": "#ff0000"}, format="json")
     assert tag.status_code == 201
@@ -202,16 +216,18 @@ def test_crud_forms_and_key_actions(api):
     monitor = api.post(
         "/api/v1/monitors/",
         {
-            "business": business.data["id"], "name": "存活探测", "monitor_type": "HTTP",
-            "target": "http://192.168.31.61/health/live", "interval_seconds": 60,
-            "timeout_seconds": 10, "tags": [tag.data["id"]],
+            "business": business.data["id"],
+            "name": "存活探测",
+            "monitor_type": "HTTP",
+            "target": "http://192.168.31.61/health/live",
+            "interval_seconds": 60,
+            "timeout_seconds": 10,
+            "tags": [tag.data["id"]],
         },
         format="json",
     )
     assert monitor.status_code == 201
-    with patch(
-        "apps.core.tasks.execute_probe", return_value={"success": True, "status_code": 200}
-    ):
+    with patch("apps.core.tasks.execute_probe", return_value={"success": True, "status_code": 200}):
         assert api.post(f"/api/v1/monitors/{monitor.data['id']}/test/").data["success"]
     assert api.patch(f"/api/v1/tags/{tag.data['id']}/", {"name": "核心系统"}).status_code == 200
     assert api.delete(f"/api/v1/tags/{tag.data['id']}/").status_code == 204
@@ -230,21 +246,19 @@ def test_user_password_incident_and_readonly_guards(api):
     )
     assert updated.status_code == 200
 
-    role = api.post(
-        "/api/v1/roles/", {"name": "运维人员", "code": "OPERATOR"}, format="json"
-    )
+    role = api.post("/api/v1/roles/", {"name": "运维人员", "code": "OPERATOR"}, format="json")
     created = api.post(
         "/api/v1/users/",
         {
             "username": "operator1",
-            "password": "Op3r!123",
+            "password": "OpsSecure!2026abcd",
             "is_active": True,
             "roles": [role.data["id"]],
         },
         format="json",
     )
     assert created.status_code == 201
-    assert User.objects.get(username="operator1").check_password("Op3r!123")
+    assert User.objects.get(username="operator1").check_password("OpsSecure!2026abcd")
     too_short = api.post(
         "/api/v1/users/",
         {"username": "operator2", "password": "1234567", "is_active": True},
@@ -270,9 +284,7 @@ def test_user_password_incident_and_readonly_guards(api):
     )
     acknowledged = api.post(f"/api/v1/incidents/{incident.id}/acknowledge/")
     assert acknowledged.data["status"] == "ACKNOWLEDGED"
-    closed = api.post(
-        f"/api/v1/incidents/{incident.id}/close/", {"resolution": "已恢复"}
-    )
+    closed = api.post(f"/api/v1/incidents/{incident.id}/close/", {"resolution": "已恢复"})
     assert closed.data["status"] == "CLOSED"
     now = timezone.now()
     result = MonitorResult.objects.create(

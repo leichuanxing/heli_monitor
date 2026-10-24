@@ -73,7 +73,7 @@ onMounted(load)
       <el-row :gutter="18">
         <el-col :span="8"><el-form-item label="监控总览刷新周期"><el-input-number v-model="form.dashboard_refresh_seconds" :min="5" :max="300" controls-position="right"/><small>单位：秒，范围 5–300。</small></el-form-item></el-col>
         <el-col :span="8"><el-form-item label="监控大屏刷新周期"><el-input-number v-model="form.monitor_wall_refresh_seconds" :min="5" :max="300" controls-position="right"/><small>WebSocket 之外的兜底同步周期，单位：秒。</small></el-form-item></el-col>
-        <el-col :span="8"><el-form-item label="单任务探测结果保留数"><el-input-number v-model="form.monitor_result_retention_count" :min="100" :max="1000000" :step="1000" controls-position="right"/><small>每个探测任务独立保留，范围 100–1,000,000。</small></el-form-item></el-col>
+        <el-col :span="8"><el-form-item label="单任务最低保留条数"><el-input-number v-model="form.monitor_result_retention_count" :min="100" :max="1000000" :step="1000" controls-position="right"/><small>每个任务同时至少保留最近 31 天的数据；超过 31 天后按此条数保留，范围 100–1,000,000。</small></el-form-item></el-col>
       </el-row>
       <el-button type="primary" :loading="saving" :disabled="!systemSettings.can_manage" @click="save">保存设置</el-button>
       <el-alert v-if="!systemSettings.can_manage" class="permission-tip" title="当前账号只有查看权限，修改设置需要“系统维护”权限" type="info" :closable="false"/>

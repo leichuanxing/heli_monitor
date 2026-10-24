@@ -1,8 +1,12 @@
+import re
 from copy import deepcopy
 from datetime import datetime
-from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
@@ -23,6 +27,8 @@ from apps.monitors.models import (
 )
 from apps.status_pages.models import StatusPage
 
+from .iam import SYSTEM_ROLES, guard_role, guard_user, role_permissions
+from .monitor_config import DATABASE_TYPES, SECRET_HEADERS, validate_config
 from .permissions import VALID_PERMISSIONS
 from .secrets import encrypt_secret
 
@@ -55,25 +61,50 @@ class DepartmentSerializer(BaseSerializer):
         model = Department
         fields = "__all__"
 
-    def validate_parent(self, parent):
-        if self.instance and parent:
-            node = parent
-            while node:
-                if node.pk == self.instance.pk:
-                    raise serializers.ValidationError("上级部门不能是自身或自身的下级部门")
-                node = node.parent
-        return parent
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        parent = attrs.get("parent", getattr(self.instance, "parent", None))
+        node, seen = parent, set()
+        while node:
+            if node.pk in seen or (self.instance and node.pk == self.instance.pk):
+                raise serializers.ValidationError({"parent": "上级部门不能形成循环"})
+            seen.add(node.pk)
+            node = node.parent
+        duplicate = Department.objects.filter(
+            parent=parent, name=attrs.get("name", getattr(self.instance, "name", ""))
+        )
+        if self.instance:
+            duplicate = duplicate.exclude(pk=self.instance.pk)
+        if duplicate.exists():
+            raise serializers.ValidationError({"name": "同一上级下已存在同名部门"})
+        return attrs
 
 
 class RoleSerializer(BaseSerializer):
+    is_system_role = serializers.SerializerMethodField()
+    effective_permissions = serializers.SerializerMethodField()
+
+    def get_is_system_role(self, obj) -> bool:
+        return obj.code in SYSTEM_ROLES
+
+    def get_effective_permissions(self, obj) -> list[str]:
+        return sorted(role_permissions(obj))
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        request = self.context.get("request")
+        guard_role(getattr(request, "user", None), self.instance, attrs)
+        return attrs
+
     user_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Role
         fields = "__all__"
+        read_only_fields = ("data_scope",)
 
     def validate_permissions(self, value):
-        if not isinstance(value, list):
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
             raise serializers.ValidationError("权限必须为列表")
         invalid = set(value) - VALID_PERMISSIONS
         if invalid:
@@ -85,22 +116,23 @@ class UserSerializer(BaseSerializer):
     password = serializers.CharField(
         write_only=True,
         required=False,
-        min_length=8,
-        error_messages={"min_length": "用户密码至少为8位"},
+        min_length=12,
+        trim_whitespace=False,
+        error_messages={"min_length": "用户密码至少为12位"},
     )
     roles = serializers.PrimaryKeyRelatedField(
         source="business_roles", queryset=Role.objects.all(), many=True, required=False
     )
     department = serializers.PrimaryKeyRelatedField(
         source="profile.department",
-        queryset=Department.objects.filter(is_enabled=True),
+        queryset=Department.objects.all(),
         required=False,
         allow_null=True,
     )
     department_name = serializers.CharField(source="profile.department.name", read_only=True)
     phone = serializers.CharField(source="profile.phone", required=False, allow_blank=True)
     data_scope = serializers.ChoiceField(
-        source="profile.data_scope", choices=["ALL", "DEPARTMENT", "SELF"], required=False
+        source="profile.data_scope", choices=["ALL", "DEPARTMENT", "SELF"], read_only=True
     )
 
     class Meta:
@@ -123,6 +155,38 @@ class UserSerializer(BaseSerializer):
         )
         read_only_fields = ("date_joined", "is_superuser")
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        request = self.context.get("request")
+        guard_user(getattr(request, "user", None), self.instance, attrs)
+        department = attrs.get("profile", {}).get("department")
+        old_department = getattr(getattr(self.instance, "profile", None), "department_id", None)
+        if department and not department.is_enabled and department.pk != old_department:
+            raise serializers.ValidationError({"department": "不能新分配到停用部门"})
+        old_roles = (
+            set(self.instance.business_roles.values_list("pk", flat=True))
+            if self.instance
+            else set()
+        )
+        if any(
+            not role.is_enabled and role.pk not in old_roles
+            for role in attrs.get("business_roles", [])
+        ):
+            raise serializers.ValidationError({"roles": "不能新分配已停用角色"})
+        password = attrs.get("password")
+        if self.instance is None and not password:
+            raise serializers.ValidationError({"password": "创建账号必须设置初始密码"})
+        if password:
+            try:
+                candidate = User(
+                    username=attrs.get("username", getattr(self.instance, "username", "")),
+                    email=attrs.get("email", getattr(self.instance, "email", "")),
+                )
+                validate_password(password, candidate)
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({"password": list(exc.messages)}) from exc
+        return attrs
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         # Accounts created outside this API may not have a UserProfile yet.
@@ -131,6 +195,7 @@ class UserSerializer(BaseSerializer):
             data["data_scope"] = "SELF"
         return data
 
+    @transaction.atomic
     def create(self, validated_data):
         password = validated_data.pop("password", None)
         roles = validated_data.pop("business_roles", [])
@@ -160,9 +225,74 @@ class UserSerializer(BaseSerializer):
         return instance
 
 
-BusinessGroupSerializer = serializer_for(BusinessGroup)
-TagSerializer = serializer_for(Tag)
-BusinessSystemSerializer = serializer_for(BusinessSystem)
+class BusinessGroupSerializer(BaseSerializer):
+    parent_name = serializers.CharField(source="parent.name", read_only=True, default="")
+
+    class Meta:
+        model = BusinessGroup
+        fields = "__all__"
+        validators = []
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        parent = attrs.get("parent", getattr(self.instance, "parent", None))
+        seen = set()
+        node = parent
+        while node:
+            if node.pk in seen or (self.instance and node.pk == self.instance.pk):
+                raise serializers.ValidationError(
+                    {"parent": "父级不能是自身或下级分组，不能形成循环"}
+                )
+            seen.add(node.pk)
+            node = node.parent
+        name = attrs.get("name", getattr(self.instance, "name", ""))
+        duplicates = BusinessGroup.objects.filter(parent=parent, name=name)
+        if self.instance:
+            duplicates = duplicates.exclude(pk=self.instance.pk)
+        if duplicates.exists():
+            raise serializers.ValidationError({"name": "同一父级下已存在同名业务分组"})
+        return attrs
+
+
+class TagSerializer(BaseSerializer):
+    class Meta:
+        model = Tag
+        fields = "__all__"
+
+    def validate_color(self, value):
+        if not re.fullmatch(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?", value):
+            raise serializers.ValidationError("请输入十六进制颜色，如 #409EFF")
+        return value.upper()
+
+
+class BusinessSystemSerializer(BaseSerializer):
+    sla_target = serializers.DecimalField(
+        max_digits=6, decimal_places=3, min_value=0, max_value=100, required=False
+    )
+    group_name = serializers.CharField(source="group.name", read_only=True, default="")
+    department_name = serializers.CharField(source="department.name", read_only=True, default="")
+    owner_name = serializers.CharField(source="owner.username", read_only=True, default="")
+    tag_names = serializers.SerializerMethodField()
+    monitor_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = BusinessSystem
+        fields = "__all__"
+
+    def get_tag_names(self, obj) -> str:
+        return "、".join(tag.name for tag in obj.tags.all())
+
+    def validate_service_schedule(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("服务时间元数据必须是对象")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        archived = attrs.get("is_archived", getattr(self.instance, "is_archived", False))
+        if archived:
+            attrs["is_enabled"] = False
+        return attrs
 
 
 class MonitorSerializer(BaseSerializer):
@@ -179,18 +309,24 @@ class MonitorSerializer(BaseSerializer):
         return state, getattr(state, "last_result", None)
 
     def get_current_status(self, obj) -> str:
-        if not obj.is_enabled:
+        if not obj.is_enabled or not obj.business.is_enabled or obj.business.is_archived:
             return "PAUSED"
         state, result = self._state_and_result(obj)
         status = getattr(state, "status", "PENDING")
-        if result is not None and not result.success and status not in ("DOWN", "MAINTENANCE"):
+        if (
+            result is not None
+            and not result.success
+            and status not in ("DOWN", "MAINTENANCE", "PENDING", "PAUSED")
+        ):
             return "DEGRADED"
         return status
 
     def get_service_available(self, obj) -> bool | None:
-        if not obj.is_enabled:
+        if not obj.is_enabled or not obj.business.is_enabled or obj.business.is_archived:
             return None
-        _, result = self._state_and_result(obj)
+        state, result = self._state_and_result(obj)
+        if state and state.status == "PENDING":
+            return None
         return result.success if result is not None else None
 
     def get_last_checked_at(self, obj) -> datetime | None:
@@ -207,147 +343,219 @@ class MonitorSerializer(BaseSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
-        monitor_type = attrs.get("monitor_type", getattr(self.instance, "monitor_type", None))
+        if set(attrs) == {"is_enabled"} and attrs["is_enabled"] is False:
+            return attrs
+        kind = attrs.get("monitor_type", getattr(self.instance, "monitor_type", None))
         target = str(attrs.get("target", getattr(self.instance, "target", ""))).strip()
-        config = attrs.get("config", getattr(self.instance, "config", {}) or {}) or {}
-        auth = dict(config.get("auth") or {})
-        old_auth = dict((getattr(self.instance, "config", {}) or {}).get("auth") or {})
+        config = deepcopy(attrs.get("config", getattr(self.instance, "config", {})))
+        if not isinstance(config, dict) or not isinstance(config.get("auth", {}), dict):
+            raise serializers.ValidationError({"config": "配置和 auth 必须是 JSON 对象"})
+        limits = {
+            "interval_seconds": (5, 86400, 60),
+            "timeout_seconds": (1, 30, 10),
+            "failure_threshold": (1, 100, 3),
+            "recovery_threshold": (1, 100, 2),
+        }
+        for field, (low, high, default) in limits.items():
+            value = attrs.get(field, getattr(self.instance, field, default))
+            if not low <= value <= high:
+                raise serializers.ValidationError({field: f"必须在 {low} 到 {high} 之间"})
+        timeout = attrs.get("timeout_seconds", getattr(self.instance, "timeout_seconds", 10))
+        interval = attrs.get("interval_seconds", getattr(self.instance, "interval_seconds", 60))
+        if timeout >= interval:
+            raise serializers.ValidationError({"timeout_seconds": "必须小于探测周期"})
+        old = getattr(self.instance, "config", {}) or {}
+        auth = config.get("auth", {})
         for key in ("token", "password", "value", "client_secret"):
             if auth.get(key) == self.secret_mask:
-                if old_auth.get(key):
-                    auth[key] = old_auth[key]
-                else:
-                    auth.pop(key, None)
-        if auth:
-            config = {**config, "auth": auth}
-            attrs["config"] = config
-        database_types = {"MSSQL", "POSTGRESQL", "MYSQL", "MONGODB"}
-        if monitor_type in database_types and config.get("password") == self.secret_mask:
-            old_password = (getattr(self.instance, "config", {}) or {}).get("password")
-            config = {**config}
-            if old_password:
-                config["password"] = old_password
-            else:
-                config.pop("password", None)
-            attrs["config"] = config
-        if monitor_type in ("HTTP", "API"):
-            parsed = urlparse(target)
-            if parsed.scheme not in ("http", "https") or not parsed.netloc:
-                raise serializers.ValidationError(
-                    {"target": "请输入完整 URL，例如 https://api.example.com/health"}
+                auth[key] = (old.get("auth") or {}).get(key, "")
+        if config.get("password") == self.secret_mask:
+            config["password"] = old.get("password", "")
+        for key, value in (
+            (config.get("headers") or {}).items()
+            if isinstance(config.get("headers", {}), dict)
+            else []
+        ):
+            if key.lower() in SECRET_HEADERS and value == self.secret_mask:
+                config["headers"][key] = next(
+                    (v for k, v in old.get("headers", {}).items() if k.lower() == key.lower()), ""
                 )
-        elif monitor_type == "TCP":
-            try:
-                host, port = target.rsplit(":", 1)
-                valid = bool(host) and 1 <= int(port) <= 65535
-            except (ValueError, TypeError):
-                valid = False
-            if not valid:
-                raise serializers.ValidationError(
-                    {"target": "请输入 主机:端口，例如 10.0.0.8:8080"}
-                )
-        elif monitor_type == "SSL":
-            host, _, port = target.rpartition(":")
-            if port and (not host or not port.isdigit() or not 1 <= int(port) <= 65535):
-                raise serializers.ValidationError(
-                    {"target": "请输入域名或 域名:端口，例如 example.com:443"}
-                )
-        elif monitor_type in ("PING", "DNS") and "://" in target:
-            raise serializers.ValidationError({"target": "请输入主机名或 IP，不要包含协议前缀"})
-        elif monitor_type in database_types:
-            try:
-                host, separator, raw_port = target.rpartition(":")
-                valid = bool(target) and "://" not in target
-                if separator:
-                    valid = (
-                        valid
-                        and bool(host)
-                        and raw_port.isdigit()
-                        and 1 <= int(raw_port) <= 65535
-                    )
-            except (ValueError, TypeError):
-                valid = False
-            if not valid:
-                raise serializers.ValidationError(
-                    {"target": "请输入数据库主机或 主机:端口，不要包含连接协议"}
-                )
-        if not isinstance(config, dict):
-            raise serializers.ValidationError({"config": "高级配置必须是 JSON 对象"})
-        if monitor_type in ("HTTP", "API"):
-            if config.get("headers") is not None and not isinstance(config["headers"], dict):
-                raise serializers.ValidationError({"config": "headers 必须是 JSON 对象"})
-            if config.get("params") is not None and not isinstance(config["params"], dict):
-                raise serializers.ValidationError({"config": "params 必须是 JSON 对象"})
-            body_fields = [key for key in ("json", "form", "body") if config.get(key) is not None]
-            if len(body_fields) > 1:
-                raise serializers.ValidationError(
-                    {"config": "json、form、body 三种请求体只能配置一种"}
-                )
-            auth = config.get("auth") or {}
-            requirements = {
-                "bearer": ("token",),
-                "basic": ("username", "password"),
-                "api_key": ("name", "value"),
-                "oauth2_client_credentials": ("token_url", "client_id", "client_secret"),
-            }
-            auth_type = str(auth.get("type", "none")).lower()
-            if auth_type not in {"none", "", *requirements}:
-                raise serializers.ValidationError({"config": f"不支持的认证类型：{auth_type}"})
-            missing = [key for key in requirements.get(auth_type, ()) if not auth.get(key)]
-            if missing:
-                raise serializers.ValidationError(
-                    {"config": f"认证配置缺少参数：{', '.join(missing)}"}
-                )
-        elif monitor_type in database_types:
-            required = ("database", "username", "password")
-            missing = [key for key in required if not config.get(key)]
-            if missing:
-                raise serializers.ValidationError(
-                    {"config": f"数据库配置缺少参数：{', '.join(missing)}"}
-                )
-            query = str(config.get("query", "SELECT 1")).strip()
-            if monitor_type != "MONGODB" and not query.lower().startswith(("select", "with")):
-                raise serializers.ValidationError(
-                    {"config": "安全起见，自定义数据库探测语句仅允许 SELECT 或 WITH 查询"}
-                )
-            config = {**config, "password": encrypt_secret(config["password"])}
-            attrs["config"] = config
+        try:
+            config = validate_config(kind, target, config)
+        except (ValueError, TypeError) as exc:
+            raise serializers.ValidationError({"config": str(exc)}) from exc
+        auth = config.get("auth", {})
+        for key in ("token", "password", "value", "client_secret"):
+            if auth.get(key):
+                auth[key] = encrypt_secret(auth[key])
+        for key, value in (config.get("headers") or {}).items():
+            if key.lower() in SECRET_HEADERS and value:
+                config["headers"][key] = encrypt_secret(value)
+        if kind in DATABASE_TYPES and config.get("password"):
+            config["password"] = encrypt_secret(config["password"])
+        attrs["config"], attrs["target"] = config, target
         return attrs
+
+    def update(self, instance, validated_data):
+        original = {
+            "name": instance.name,
+            "monitor_type": instance.monitor_type,
+            "target": instance.target,
+            "business_id": str(instance.business_id),
+            "business_name": instance.business.name,
+        }
+        spec_changed = any(
+            key in validated_data and validated_data[key] != getattr(instance, key)
+            for key in (
+                "monitor_type",
+                "target",
+                "config",
+                "business",
+                "interval_seconds",
+                "timeout_seconds",
+                "failure_threshold",
+                "recovery_threshold",
+                "warning_latency_ms",
+            )
+        )
+        if spec_changed or ("name" in validated_data and validated_data["name"] != instance.name):
+            instance.results.filter(monitor_snapshot={}).update(monitor_snapshot=original)
+        enabled_changed = (
+            "is_enabled" in validated_data and validated_data["is_enabled"] != instance.is_enabled
+        )
+        instance = super().update(instance, validated_data)
+        if enabled_changed or spec_changed:
+            instance.next_run_at = timezone.now()
+            instance.save(update_fields=["next_run_at"])
+            instance._state.fields_cache.pop("state", None)
+            MonitorState.objects.filter(monitor=instance).update(
+                status="PENDING" if instance.is_enabled else "PAUSED",
+                consecutive_failures=0,
+                consecutive_successes=0,
+            )
+        return instance
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         config = deepcopy(data.get("config", {}))
+        if not isinstance(config, dict):
+            config = {}
+        if not isinstance(config.get("auth", {}), dict):
+            config["auth"] = {}
+        if not isinstance(config.get("headers", {}), dict):
+            config["headers"] = {}
         data["config"] = config
-        auth = config.get("auth", {})
         for key in ("token", "password", "value", "client_secret"):
-            if auth.get(key):
-                auth[key] = self.secret_mask
-        if data.get("monitor_type") in {"MSSQL", "POSTGRESQL", "MYSQL", "MONGODB"}:
-            if config.get("password"):
-                config["password"] = self.secret_mask
+            if config.get("auth", {}).get(key):
+                config["auth"][key] = self.secret_mask
+        for key in config.get("headers", {}):
+            if key.lower() in SECRET_HEADERS and config["headers"][key]:
+                config["headers"][key] = self.secret_mask
+        if data.get("monitor_type") in DATABASE_TYPES and config.get("password"):
+            config["password"] = self.secret_mask
         return data
 
     class Meta:
         model = Monitor
         fields = "__all__"
+        read_only_fields = ("next_run_at", "is_archived", "created_at", "updated_at")
+        extra_kwargs = {
+            "config": {
+                "help_text": (
+                    "按探测类型配置；HTTP/API 支持认证、json/form/body、JSONPath断言；"
+                    "PING支持丢包阈值；SSL支持warn/fail预警。详见 docs/monitor-options.md。"
+                )
+            }
+        }
 
 
 class MonitorResultSerializer(BaseSerializer):
-    monitor_name = serializers.CharField(source="monitor.name", read_only=True)
-    monitor_type = serializers.CharField(source="monitor.monitor_type", read_only=True)
-    monitor_target = serializers.CharField(source="monitor.target", read_only=True)
-    business_name = serializers.CharField(source="monitor.business.name", read_only=True)
+    monitor_name = serializers.SerializerMethodField()
+    monitor_type = serializers.SerializerMethodField()
+    monitor_target = serializers.SerializerMethodField()
+    business_name = serializers.SerializerMethodField()
+
+    def get_monitor_name(self, obj) -> str:
+        return obj.monitor_snapshot.get("name", obj.monitor.name)
+
+    def get_monitor_type(self, obj) -> str:
+        return obj.monitor_snapshot.get("monitor_type", obj.monitor.monitor_type)
+
+    def get_monitor_target(self, obj) -> str:
+        return obj.monitor_snapshot.get("target", obj.monitor.target)
+
+    def get_business_name(self, obj) -> str:
+        return obj.monitor_snapshot.get("business_name", obj.monitor.business.name)
 
     class Meta:
         model = MonitorResult
         fields = "__all__"
         read_only_fields = (
-            "execution_key", "scheduled_at", "started_at", "checked_at", "finished_at"
+            "execution_key",
+            "scheduled_at",
+            "started_at",
+            "checked_at",
+            "finished_at",
         )
+
+
 MonitorStateSerializer = serializer_for(MonitorState)
 BusinessChainSerializer = serializer_for(BusinessChain)
-ChainNodeSerializer = serializer_for(ChainNode)
-ChainEdgeSerializer = serializer_for(ChainEdge)
+
+
+class ChainNodeSerializer(BaseSerializer):
+    class Meta:
+        model = ChainNode
+        fields = "__all__"
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        monitor = attrs.get("monitor", getattr(self.instance, "monitor", None))
+        if monitor and monitor.is_archived:
+            raise serializers.ValidationError({"monitor": "不能关联已删除的探测任务"})
+        chain = attrs.get("chain", getattr(self.instance, "chain", None))
+        if (
+            self.instance
+            and chain != self.instance.chain
+            and (self.instance.in_edges.exists() or self.instance.out_edges.exists())
+        ):
+            raise serializers.ValidationError({"chain": "节点仍有关联连线，请先移除连线再变更链路"})
+        return attrs
+
+
+class ChainEdgeSerializer(BaseSerializer):
+    class Meta:
+        model = ChainEdge
+        fields = "__all__"
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        chain = attrs.get("chain", getattr(self.instance, "chain", None))
+        source = attrs.get("source", getattr(self.instance, "source", None))
+        target = attrs.get("target", getattr(self.instance, "target", None))
+        if not all((chain, source, target)):
+            return attrs
+        if source.chain_id != chain.pk or target.chain_id != chain.pk:
+            raise serializers.ValidationError("连线两端必须属于当前业务链路")
+        if source.pk == target.pk:
+            raise serializers.ValidationError("节点不能连接自身")
+        edges = ChainEdge.objects.filter(chain=chain)
+        if self.instance:
+            edges = edges.exclude(pk=self.instance.pk)
+        graph = {}
+        for left, right in edges.values_list("source_id", "target_id"):
+            graph.setdefault(left, []).append(right)
+        pending, seen = [target.pk], set()
+        while pending:
+            node = pending.pop()
+            if node == source.pk:
+                raise serializers.ValidationError("连线将形成循环依赖")
+            if node not in seen:
+                seen.add(node)
+                pending.extend(graph.get(node, []))
+        return attrs
+
+
 IncidentTimelineSerializer = serializer_for(IncidentTimeline)
 
 
@@ -360,9 +568,24 @@ class IncidentSerializer(BaseSerializer):
     class Meta:
         model = Incident
         fields = "__all__"
+        read_only_fields = (
+            "number",
+            "monitor",
+            "status",
+            "severity",
+            "opened_at",
+            "acknowledged_at",
+            "recovered_at",
+            "closed_at",
+            "assignee",
+            "resolution",
+            "root_cause",
+        )
 
 
 class AlertRuleSerializer(BaseSerializer):
+    severity = serializers.ChoiceField(choices=("CRITICAL", "HIGH", "MEDIUM", "LOW"))
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         repeat = attrs.get(
@@ -406,7 +629,10 @@ class NotificationChannelSerializer(BaseSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         channel_type = attrs.get("channel_type", getattr(self.instance, "channel_type", None))
-        config = dict(attrs.get("config", getattr(self.instance, "config", {}) or {}))
+        config = attrs.get("config", getattr(self.instance, "config", {}) or {})
+        if not isinstance(config, dict):
+            raise serializers.ValidationError({"config": "渠道配置必须为对象"})
+        config = deepcopy(config)
         old_config = getattr(self.instance, "config", {}) or {}
         for key in ("password", "secret", "sendkey"):
             if config.get(key) == self.secret_mask:
@@ -417,15 +643,36 @@ class NotificationChannelSerializer(BaseSerializer):
         missing = [key for key in self.required_config.get(channel_type, ()) if not config.get(key)]
         if missing:
             raise serializers.ValidationError({"config": f"缺少必填参数：{', '.join(missing)}"})
+        for key in ("use_ssl", "use_tls"):
+            if key in config:
+                config[key] = serializers.BooleanField().run_validation(config[key])
         if channel_type == "EMAIL" and config.get("use_ssl") and config.get("use_tls"):
             raise serializers.ValidationError({"config": "SSL 与 STARTTLS 不能同时启用"})
-        if config.get("timeout") is not None and not 1 <= float(config["timeout"]) <= 60:
-            raise serializers.ValidationError({"config": "超时时间必须在 1 到 60 秒之间"})
+        if config.get("timeout") is not None:
+            config["timeout"] = serializers.FloatField(min_value=1, max_value=60).run_validation(
+                config["timeout"]
+            )
+        if config.get("port") is not None:
+            config["port"] = serializers.IntegerField(min_value=1, max_value=65535).run_validation(
+                config["port"]
+            )
+        if "headers" in config and (
+            not isinstance(config["headers"], dict)
+            or any(
+                not isinstance(k, str) or not isinstance(v, str) or "\n" in k + v or "\r" in k + v
+                for k, v in config["headers"].items()
+            )
+        ):
+            raise serializers.ValidationError({"config": "请求头必须为字符串对象，且不能包含换行"})
+        for key in ("password", "secret", "sendkey"):
+            if config.get(key):
+                config[key] = encrypt_secret(config[key])
         attrs["config"] = config
         return attrs
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        data["config"] = deepcopy(data.get("config") or {})
         for key in ("password", "secret", "sendkey"):
             if data.get("config", {}).get(key):
                 data["config"][key] = self.secret_mask
@@ -444,6 +691,13 @@ class NotificationLogSerializer(BaseSerializer):
 
 
 class MaintenanceWindowSerializer(BaseSerializer):
+    def validate_timezone(self, value):
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise serializers.ValidationError("请输入有效的 IANA 时区，如 Asia/Shanghai") from exc
+        return value
+
     business_names = serializers.SerializerMethodField()
     monitor_names = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
@@ -491,6 +745,11 @@ class MaintenanceWindowSerializer(BaseSerializer):
 
 
 class StatusPageSerializer(BaseSerializer):
+    def validate_theme_color(self, value):
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise serializers.ValidationError("请输入六位十六进制主题色")
+        return value
+
     business_names = serializers.SerializerMethodField()
     monitor_names = serializers.SerializerMethodField()
     monitor_count = serializers.SerializerMethodField()
@@ -558,3 +817,8 @@ class LoginRecordSerializer(BaseSerializer):
     class Meta:
         model = LoginRecord
         fields = "__all__"
+
+
+class SlaQuerySerializer(serializers.Serializer):
+    days = serializers.IntegerField(min_value=1, max_value=365, default=30)
+    business = serializers.UUIDField(required=False)

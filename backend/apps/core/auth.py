@@ -1,7 +1,11 @@
+from secrets import compare_digest
+
 from django.contrib.auth import get_user_model
 from rest_framework.exceptions import AuthenticationFailed
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.utils import get_md5_hash_password
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from apps.audit.models import LoginRecord
 
@@ -42,3 +46,23 @@ class AuditedTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 class AuditedTokenObtainPairView(TokenObtainPairView):
     serializer_class = AuditedTokenObtainPairSerializer
+
+
+class RevokingTokenRefreshSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        refresh = self.token_class(attrs["refresh"])
+        user = (
+            get_user_model()
+            .objects.filter(pk=refresh.get(api_settings.USER_ID_CLAIM), is_active=True)
+            .first()
+        )
+        if user is None or not compare_digest(
+            str(refresh.get(api_settings.REVOKE_TOKEN_CLAIM, "")),
+            get_md5_hash_password(user.password),
+        ):
+            raise AuthenticationFailed("登录凭据已失效，请重新登录")
+        return super().validate(attrs)
+
+
+class RevokingTokenRefreshView(TokenRefreshView):
+    serializer_class = RevokingTokenRefreshSerializer

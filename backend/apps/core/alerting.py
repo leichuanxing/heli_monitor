@@ -9,6 +9,18 @@ SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
 
 def matching_rules(incident):
+    monitor = incident.monitor
+    if (
+        not monitor.is_enabled
+        or monitor.is_archived
+        or not monitor.business.is_enabled
+        or monitor.business.is_archived
+    ):
+        return []
+    from .state_engine import active_maintenance
+
+    if active_maintenance(incident.monitor).filter(suppress_notifications=True).exists():
+        return []
     return list(
         AlertRule.objects.filter(is_enabled=True, monitors=incident.monitor)
         .prefetch_related("channels")
@@ -19,7 +31,20 @@ def matching_rules(incident):
 def apply_enabled_rule(incident, rules):
     if not rules:
         return False
-    severity = min((rule.severity for rule in rules), key=SEVERITY_ORDER.get)
+    if incident.status not in ("NEW", "ACKNOWLEDGED", "PROCESSING"):
+        return True
+    levels = list(SEVERITY_ORDER)
+    elapsed = (timezone.now() - incident.opened_at).total_seconds()
+    ranks = []
+    for rule in rules:
+        rank = SEVERITY_ORDER.get(rule.severity, 1)
+        if (
+            incident.status in ("NEW", "ACKNOWLEDGED", "PROCESSING")
+            and elapsed >= rule.escalation_minutes * 60
+        ):
+            rank = max(0, rank - 1)
+        ranks.append(rank)
+    severity = levels[min(ranks)]
     if incident.severity != severity:
         incident.severity = severity
         incident.save(update_fields=["severity"])
@@ -32,10 +57,7 @@ def queue_incident_notifications(incident, phase):
         return 0
     created_ids = []
     channel_ids = {
-        channel.id
-        for rule in rules
-        for channel in rule.channels.all()
-        if channel.is_enabled
+        channel.id for rule in rules for channel in rule.channels.all() if channel.is_enabled
     }
     for channel in NotificationChannel.objects.filter(id__in=channel_ids, is_enabled=True):
         log, created = NotificationLog.objects.get_or_create(

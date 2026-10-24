@@ -12,13 +12,15 @@ from .alerting import queue_incident_notifications
 OPEN = ("NEW", "ACKNOWLEDGED", "PROCESSING")
 
 
-def in_maintenance(monitor, at=None):
+def active_maintenance(monitor, at=None):
     at = at or timezone.now()
-    return (
-        MaintenanceWindow.objects.filter(is_enabled=True, start_at__lte=at, end_at__gte=at)
-        .filter(models_q(monitor))
-        .exists()
-    )
+    return MaintenanceWindow.objects.filter(
+        is_enabled=True, start_at__lte=at, end_at__gte=at
+    ).filter(models_q(monitor))
+
+
+def in_maintenance(monitor, at=None):
+    return active_maintenance(monitor, at).exists()
 
 
 def models_q(monitor):
@@ -31,10 +33,16 @@ def models_q(monitor):
 def apply_result(result):
     monitor = result.monitor
     state, _ = MonitorState.objects.select_for_update().get_or_create(monitor=monitor)
+    if state.last_result_id:
+        last = state.last_result
+        if (result.scheduled_at, result.pk) <= (last.scheduled_at, last.pk):
+            return state
     previous = state.status
     if not monitor.is_enabled:
         new_status = "PAUSED"
     elif in_maintenance(monitor, result.checked_at):
+        state.consecutive_successes = state.consecutive_successes + 1 if result.success else 0
+        state.consecutive_failures = 0 if result.success else state.consecutive_failures + 1
         new_status = "MAINTENANCE"
     elif result.success:
         state.consecutive_successes += 1
@@ -47,9 +55,14 @@ def apply_result(result):
         else:
             new_status = (
                 "DEGRADED"
-                if monitor.warning_latency_ms
-                and result.latency_ms
-                and result.latency_ms >= monitor.warning_latency_ms
+                if (
+                    result.metrics.get("warning")
+                    or (
+                        monitor.warning_latency_ms
+                        and result.latency_ms is not None
+                        and result.latency_ms >= monitor.warning_latency_ms
+                    )
+                )
                 else "UP"
             )
     else:
@@ -70,17 +83,27 @@ def apply_result(result):
             occurred_at=result.checked_at,
             result=result,
         )
-        if result.success and new_status == "UP" and previous in ("DOWN", "DEGRADED"):
-            for incident in Incident.objects.filter(monitor=monitor, status__in=OPEN):
-                incident.status = "RECOVERED"
-                incident.recovered_at = result.checked_at
-                incident.save(update_fields=["status", "recovered_at"])
-                IncidentTimeline.objects.create(
-                    incident=incident, action="RECOVERED", payload={"result_id": result.id}
-                )
-                queue_incident_notifications(incident, "RECOVERY")
+    if (
+        result.success
+        and new_status in ("UP", "MAINTENANCE")
+        and state.consecutive_successes >= monitor.recovery_threshold
+    ):
+        for incident in Incident.objects.filter(monitor=monitor, status__in=OPEN):
+            incident.status = "RECOVERED"
+            incident.recovered_at = result.checked_at
+            incident.save(update_fields=["status", "recovered_at"])
+            IncidentTimeline.objects.create(
+                incident=incident, action="RECOVERED", payload={"result_id": result.id}
+            )
+            queue_incident_notifications(incident, "RECOVERY")
     # 即使任务此前已因高延迟处于 DEGRADED，首次真实失败也必须立即产生事件。
-    if not result.success and new_status in ("DEGRADED", "DOWN"):
+    maintenance_alerts = (
+        new_status == "MAINTENANCE"
+        and not active_maintenance(monitor, result.checked_at)
+        .filter(suppress_notifications=True)
+        .exists()
+    )
+    if not result.success and (new_status in ("DEGRADED", "DOWN") or maintenance_alerts):
         number = f"INC-{result.checked_at:%Y%m%d}-{str(monitor.id)[:8]}-{result.id}"
         incident, created = Incident.objects.get_or_create(
             monitor=monitor,
