@@ -227,3 +227,18 @@ pre { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; color: va
   .history-filters .el-date-editor--datetimerange .el-range-separator { display: none; }
   .history-filters .el-date-editor--datetimerange .el-range__close-icon { grid-column: 3; grid-row: 1 / -1; }
 }
+
+/* Date panels retain both calendars and time editors on narrow screens. */
+@media (max-width: 800px) {
+  .el-picker__popper { max-width: calc(100vw - 20px); max-height: calc(100dvh - 24px); overflow-y: auto; overscroll-behavior: contain; }
+  .el-date-range-picker { width: min(646px, calc(100vw - 22px)) !important; }
+  .el-date-range-picker .el-picker-panel__body { min-width: 0 !important; }
+  .el-date-range-picker__content { width: 100% !important; float: none !important; padding: 14px; }
+  .el-date-range-picker__content.is-left { border-right: 0; }
+  .el-date-range-picker__content.is-right { border-top: 1px solid var(--divider); }
+  .el-date-range-picker__time-header { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+  .el-date-range-picker__editors-wrap { width: 100%; }
+  .el-date-range-picker__time-header > .el-icon { display: none; }
+  .el-picker-panel__footer { position: sticky; bottom: 0; z-index: 1; background: var(--surface); }
+  .el-select__popper { max-width: calc(100vw - 24px); }
+}
