@@ -1,8 +1,63 @@
 # Heli Monitor · 合力数据业务监控系统
 
-**版本：v1.0.3 · 发布日期：2026-10-30**
+**版本：v1.0.3 · 发布日期：2026-10-30 · 文档更新：2026-10-30**
 
 面向业务可用性的监控与运维管理平台。通过网络、接口和数据库探测采集实际结果，集中展示业务状态、响应趋势、故障事件及 SLA，并按规则投递告警通知。
+
+## 界面预览
+
+以下图片由 v1.0.3 的实际 Vue 页面及组件渲染，使用明确标注的**演示数据**，不代表生产运行状态；域名、业务和指标均为展示示例。截图来源见 [截图说明](docs/screenshots/README.md)。
+
+### 监控总览
+
+集中查看业务健康度、探测状态、响应时间及待处理事件，管理界面支持浅色和深色主题。
+
+![监控总览：浅色主题、业务健康和故障态势](docs/homepage.jpg)
+
+<details>
+<summary>查看深色主题</summary>
+
+![监控总览：深色主题](docs/screenshots/overview-dark.jpg)
+
+</details>
+
+### 大屏选择与展示
+
+从缩略图选择“经典运维大屏”或“全景驾驶舱”。两套布局均支持自适应及全屏，较长列表通过分页与轮播查看。
+
+![监控大屏选择页：两套布局缩略图](docs/screenshots/wall-gallery.jpg)
+
+<details>
+<summary>经典运维大屏：运维态势、业务指标和监控面板同屏展示</summary>
+
+![经典运维大屏](docs/screenshots/wall-classic.jpg)
+
+</details>
+
+<details>
+<summary>全景驾驶舱：原始响应趋势与九个内容面板</summary>
+
+![全景驾驶舱](docs/screenshots/wall-panorama.jpg)
+
+</details>
+
+### 探测配置与证书历史
+
+常用参数紧凑排列，高级请求配置及告警策略按需展开。SSL 任务历史弹窗显示证书有效期天数与到期时间，汇总历史趋势页不显示证书卡片。
+
+<details>
+<summary>查看 API 任务编辑界面</summary>
+
+![API 探测任务编辑：双列基础参数与请求入口](docs/screenshots/probe-editor.jpg)
+
+</details>
+
+<details>
+<summary>查看 SSL 任务历史弹窗</summary>
+
+![SSL 任务历史：证书有效期天数与到期时间](docs/screenshots/ssl-history.jpg)
+
+</details>
 
 ## v1.0.3 更新
 
@@ -148,12 +203,63 @@ python3 scripts/smoke_test.py http://127.0.0.1
 
 不要把“页面可打开”或模拟测试通过视为所有外部探测和通知渠道已经验证；真实目标、网络和接收端须在部署环境逐项核验。
 
-## 离线部署与排障
+## 交互式离线安装
 
-离线脚本和依赖准备要求见 [offline/README.md](offline/README.md)。打包脚本从 `VERSION` 读取版本，v1.0.3 包名为 `heli-monitor-offline-v1.0.3-el9-x86_64.tar.gz`。Git 标签仅包含源码，不代表已提供对应的离线镜像或完整安装包。
+完整包名：`heli-monitor-offline-v1.0.3-el9-x86_64.tar.gz`，约 **437 MiB**，另附同名 `.sha256` 校验文件。目标平台为 **EL9 x86_64（Rocky Linux 9、AlmaLinux 9、RHEL 9）**；内置应用及 PostgreSQL、Redis、Nginx 镜像，包含 Docker CE、CLI、containerd、Buildx、Compose 和系统依赖 RPM。
+
+完整离线包为单独交付物，**当前 GitHub 源码、标签及 Release 未附带镜像或 RPM 二进制包**。下列向导对应当前 main 分支安装器和单独交付的 v1.0.3 离线包。详细要求见 [离线安装说明](offline/README.md)，测试边界见 [离线安装验证记录](offline/VALIDATION.md)。
+
+将部署包及校验文件复制到目标服务器的同一目录：
+
+```bash
+sha256sum -c heli-monitor-offline-v1.0.3-el9-x86_64.tar.gz.sha256
+tar -xzf heli-monitor-offline-v1.0.3-el9-x86_64.tar.gz
+cd offline
+sudo bash install.sh
+```
+
+| 引导步骤 | 默认值／行为 |
+| --- | --- |
+| Docker 检测 | 已有 Docker 时保留原配置及存储目录；缺少 Compose 时离线补齐插件 |
+| Docker 存储目录 | 无 Docker 时询问，默认 `/var/lib/docker`；随后离线安装相关软件 |
+| 数据持久化目录 | `/opt/monitor`；PostgreSQL、Redis 绑定至此目录的子目录 |
+| 应用端口 | `80`；安装前检查端口占用 |
+| 应用登录用户 | `admin`，可自定义 |
+| 应用登录密码 | 用户输入并确认；至少 12 位，按应用密码策略校验 |
+| 安装过程 | 10 阶段进度、镜像导入、迁移、服务启动和健康检查日志 |
+| 完成信息 | 访问地址、登录账号、持久化目录、Docker 目录、日志及管理命令 |
+
+密码不写入安装日志或应用 `.env`；交互安装完成时仅在当前终端显示。已有安装和非空数据目录不会被向导覆盖，也不会自动重置现有账号或迁移旧 Docker 数据。
+
+```text
+/opt/monitor/
+├── app/       # 应用、编排文件、私有 .env、manage.sh
+├── postgres/  # PostgreSQL 持久化数据
+├── redis/     # Redis 持久化数据
+├── backups/   # 数据库备份
+└── logs/      # 安装日志
+```
+
+安装完成后使用所选目录中的管理脚本：
+
+```bash
+/opt/monitor/app/manage.sh status
+/opt/monitor/app/manage.sh health
+/opt/monitor/app/manage.sh logs backend
+/opt/monitor/app/manage.sh backup
+/opt/monitor/app/manage.sh stop
+/opt/monitor/app/manage.sh start
+```
+
+自定义目录时替换上述路径。安装器不自动修改防火墙、安全组或内核参数；外部访问需按实际策略放行所选端口。当前已验证真实交互安装、登录、容器重建和持久化；无 Docker 分支通过脚本回归及离线 RPM 事务检查，尚未做全新裸机启动验收。
+
+重新打包请使用当前 main 分支的安装脚本，自行准备与清单一致的镜像归档和 RPM 归档，再执行 `bash offline/build-package.sh`。打包会排除生产 `.env`、数据库、node_modules、缓存和备份，并生成组件及整包 SHA-256。
+
+## 排障
 
 - 页面或接口异常：检查 Nginx、服务健康、端口及访问域名配置。
 - 任务不执行：检查业务及任务是否启用、Worker、Beat、Redis 和目标网络策略。
 - 告警未收到：核对规则、渠道、事件状态、发送记录及接收端可达性。
 - 登录失效：确认令牌和密码是否变更，必要时重新登录。
 - 加密配置无法读取：保留并恢复原密钥；更换密钥不能解密旧配置。
+- 离线安装失败：先查看持久化目录下的 `logs/install-*.log`，再核对容器日志；不要删除已有数据后反复重装。

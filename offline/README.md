@@ -1,104 +1,67 @@
-# 合力数据业务监控系统离线部署包
+# Heli Monitor v1.0.3 离线部署包
 
-本目录用于在无外网 Linux 服务器上部署合力数据业务监控系统，包含应用源码、全部 Docker 镜像、配置模板和安装管理脚本。
+目标平台：**EL9 x86_64（Rocky Linux 9、AlmaLinux 9、RHEL 9）**。包内包含对应 Docker CE、CLI、containerd、Buildx、Compose 及依赖 RPM、v1.0.3 应用镜像和源码，安装不需要访问互联网。其他发行版或 ARM64 请使用匹配的软件包，不要混装本包 RPM。
 
-## 文件结构
+## 快速安装
+
+```bash
+sha256sum -c heli-monitor-offline-v1.0.3-el9-x86_64.tar.gz.sha256
+tar -xzf heli-monitor-offline-v1.0.3-el9-x86_64.tar.gz
+cd offline
+sudo bash install.sh
+```
+
+需要 root 权限、systemd、可用磁盘及系统基础工具（Bash、tar、gzip、OpenSSL、curl、Python 3、dnf）。Docker 安装分支适用于 EL9 x86_64。建议至少 4 核、8 GB 内存，并按历史数据量预留空间。
+
+## 交互引导顺序
+
+1. 首先检测 Docker。未安装时询问 Docker 存储目录，默认 **`/var/lib/docker`**；已有 Docker 保留原存储目录和 daemon.json，缺少 Compose 时仅补齐插件。
+2. 输入数据持久化目录，默认 **`/opt/monitor`**。
+3. 输入应用端口，默认 **`80`**；安装前检查是否被占用。
+4. 输入应用登录用户名，默认 **`admin`**。
+5. 输入并确认登录密码，至少 12 位，符合应用的相似性、常见密码和纯数字校验。
+6. 确认配置，随后显示 10 阶段安装进度、镜像导入、数据库迁移、服务启动和健康检查日志。
+7. 安装完成显示访问地址、登录用户、数据目录、Docker 数据目录、日志路径和管理命令。交互终端单独显示登录密码，密码不写入安装日志、环境配置或包内文件。
+
+为保护现有数据，安装器拒绝覆盖已有 `.env` 或 PostgreSQL 数据目录，也不会重置已有账号或自动迁移旧 Docker 数据。请选择新的空目录；已有安装的升级需先备份后单独规划。
+
+## 持久化结构
 
 ```text
-offline/
-├── install.sh                         一键安装脚本
-├── manage.sh                          启停、状态、日志、备份管理脚本
-├── build-package.sh                   重建代码归档、校验文件和完整交付包
-├── config/.env.example                配置参考
-├── docker/docker-ce-el9-x86_64-rpms.tar.gz
-│                                         Docker CE、containerd、Buildx、Compose 及依赖
-├── images/heli-monitor-images.tar.gz  全部 Docker 镜像
-├── packages/heli-monitor-code.tar.gz  完整应用代码
-└── checksums.sha256                   安装包完整性校验
+/opt/monitor/                     # 可在向导中更改
+├── app/                         # 源码、编排、0600 权限的 .env 与 manage.sh
+├── postgres/                    # PostgreSQL 持久化数据
+├── redis/                       # Redis AOF 与持久化数据
+├── backups/                     # 手动数据库备份
+└── logs/                        # 安装日志，权限 0600
 ```
 
-## 环境要求
+每个数据目录使用独立 Compose 项目名，避免与其他应用或在线部署共用容器和数据库。应用镜像固定为 `v1.0.3`，服务使用 `pull_policy: never`，启动使用 `up --pull never`，禁止自动拉取镜像。SELinux 系统使用专用目录的 `:Z` 标记；不要把系统目录或其他应用目录用作安装数据目录。
 
-- Rocky Linux 9、AlmaLinux 9、RHEL 9 等 EL9 兼容系统（x86_64）
-- 默认端口 80 可用
-- 建议至少 4 核 CPU、8 GB 内存、20 GB 可用磁盘
+安装器不会自动修改防火墙或安全组。如需从其他机器访问，请按实际策略放行所选 TCP 端口。使用反向代理或其他域名时相应调整 `app/.env` 中的 `ALLOWED_HOSTS` 和 `CSRF_TRUSTED_ORIGINS` 后重建容器。
 
-安装脚本首先检查 Docker Engine 和 Docker Compose v2。两者均可用时保留现有安装并直接启动 Docker；任一缺失时，使用包内 RPM 和完整依赖离线安装 Docker CE、containerd、Buildx 与 Compose，不访问外部软件源。
-
-## 安装
+## 运维
 
 ```bash
-chmod +x install.sh manage.sh
-./install.sh
+/opt/monitor/app/manage.sh status
+/opt/monitor/app/manage.sh health
+/opt/monitor/app/manage.sh logs backend
+/opt/monitor/app/manage.sh stop
+/opt/monitor/app/manage.sh start
+/opt/monitor/app/manage.sh backup
 ```
 
-安装脚本会启动交互式向导，要求输入：
+自定义目录请替换路径。`stop` 保留数据；不要删除 postgres、redis、`.env` 或加密密钥。非交互安装须明确提供 `ADMIN_USERNAME`、`ADMIN_PASSWORD`，可同时指定 `DATA_DIR`、`NGINX_PORT`、`DOCKER_DATA_ROOT`；通过受保护的环境或 Secret 注入密码，不要写在命令历史中。非交互安装完成不会输出密码。
 
-- 系统管理用户名，默认为 `admin`
-- 系统管理密码，隐藏输入并进行二次确认，至少 8 位
-- 系统管理员邮箱，可留空
-- 业务访问端口，默认为 `80`
-- 应用部署目录，默认为 `/opt/heli_monitor`，必须使用绝对路径
+安装失败后查看 `logs/install-*.log` 和容器日志。为避免重复初始化，已有环境不会被二次向导自动覆盖。离线安装完整性清单位于 `checksums.sha256`，镜像版本与 ID 见 `images/manifest.txt`。
 
-确认配置后才会开始安装。也可以使用环境变量进行无人值守安装：
+## 重新打包与验证
+
+先准备 `offline/images/heli-monitor-images.tar.gz` 和 `offline/docker/docker-ce-el9-x86_64-rpms.tar.gz`，再运行：
 
 ```bash
-ADMIN_USERNAME=admin \
-ADMIN_PASSWORD='强密码' \
-ADMIN_EMAIL=admin@example.com \
-NGINX_PORT=8080 \
-INSTALL_DIR=/data/heli_monitor \
-./install.sh
+bash offline/build-package.sh
+python3 -m unittest discover -s offline/tests -v
 ```
 
-无人值守安装必须设置 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`。
-
-安装脚本会依次完成系统检查、Docker 检测或离线安装、镜像导入、代码部署、数据库凭据同步、数据库迁移和健康检查。数据库迁移作为独立前台步骤执行，会显示每个 Django 迁移的执行过程。脚本同时自动生成 Django 密钥、数据库密码和数据加密密钥，并将 `.env` 权限设置为 `600`。
-
-重复安装会保留已有 `.env` 和 PostgreSQL 数据卷。安装器会将已有数据库角色密码同步为当前 `.env` 配置，避免更换安装包或重新生成容器后出现 `password authentication failed`。
-
-## 日常管理
-
-```bash
-./manage.sh status
-./manage.sh health
-./manage.sh start
-./manage.sh stop
-./manage.sh restart
-./manage.sh logs backend
-./manage.sh create-admin
-./manage.sh backup
-```
-
-也可以指定安装目录：
-
-```bash
-INSTALL_DIR=/data/heli_monitor ./manage.sh status
-```
-
-`stop` 不删除 PostgreSQL 和 Redis 数据卷。脚本不提供自动删除数据卷功能。
-
-## 完整性校验
-
-```bash
-sha256sum -c checksums.sha256
-```
-
-## 更新部署包
-
-重新生成的安装包可覆盖旧的镜像和源码归档。更新生产系统前应先执行：
-
-```bash
-./manage.sh backup
-```
-
-然后使用新包中的安装脚本部署；已有 `.env` 会被保留。
-
-在联网构建机上完成镜像构建并将所需镜像归档放入 `images/`、Docker RPM 归档放入 `docker/` 后，可重新封装：
-
-```bash
-chmod +x build-package.sh
-./build-package.sh
-```
-
-版本号读取自项目根目录的 `VERSION`。默认生成 `heli-monitor-offline-v1.0.3-el9-x86_64.tar.gz` 及对应的 `.sha256` 校验文件，也可以把目标文件路径作为第一个参数传入。
+打包排除生产 `.env`、数据库、node_modules、构建缓存和备份，不会将已有业务数据放入离线包。本包不自动上传 GitHub。

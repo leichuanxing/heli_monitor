@@ -1,12 +1,13 @@
-name: heli-monitor
+name: ${COMPOSE_PROJECT_NAME:-heli-monitor-offline}
 services:
   postgres:
     image: postgres:16-alpine
+    pull_policy: never
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes: [postgres_data:/var/lib/postgresql/data]
+    volumes: ["${DATA_DIR:?DATA_DIR is required}/postgres:/var/lib/postgresql/data:Z"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
@@ -15,8 +16,9 @@ services:
     restart: unless-stopped
   redis:
     image: redis:7-alpine
+    pull_policy: never
     command: redis-server --appendonly yes
-    volumes: [redis_data:/data]
+    volumes: ["${DATA_DIR:?DATA_DIR is required}/redis:/data:Z"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -24,7 +26,8 @@ services:
       retries: 20
     restart: unless-stopped
   backend:
-    image: heli-monitor-backend:latest
+    image: heli-monitor-backend:${IMAGE_TAG:-v1.0.3}
+    pull_policy: never
     env_file: .env
     command: ["/app/entrypoint.sh", "web"]
     depends_on:
@@ -38,7 +41,8 @@ services:
       retries: 30
     restart: unless-stopped
   worker:
-    image: heli-monitor-worker:latest
+    image: heli-monitor-worker:${IMAGE_TAG:-v1.0.3}
+    pull_policy: never
     env_file: .env
     command: ["/app/entrypoint.sh", "worker"]
     depends_on:
@@ -46,7 +50,8 @@ services:
       redis: {condition: service_healthy}
     restart: unless-stopped
   beat:
-    image: heli-monitor-beat:latest
+    image: heli-monitor-beat:${IMAGE_TAG:-v1.0.3}
+    pull_policy: never
     env_file: .env
     command: ["/app/entrypoint.sh", "beat"]
     depends_on:
@@ -54,7 +59,8 @@ services:
       redis: {condition: service_healthy}
     restart: unless-stopped
   frontend:
-    image: heli-monitor-frontend:latest
+    image: heli-monitor-frontend:${IMAGE_TAG:-v1.0.3}
+    pull_policy: never
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
       interval: 10s
@@ -63,8 +69,9 @@ services:
     restart: unless-stopped
   nginx:
     image: nginx:1.27-alpine
+    pull_policy: never
     ports: ["${NGINX_PORT:-80}:80"]
-    volumes: ["./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro"]
+    volumes: ["./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro,Z"]
     depends_on:
       backend: {condition: service_healthy}
       frontend: {condition: service_healthy}
@@ -74,6 +81,3 @@ services:
       timeout: 5s
       retries: 20
     restart: unless-stopped
-volumes:
-  postgres_data:
-  redis_data:
