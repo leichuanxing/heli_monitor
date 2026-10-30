@@ -119,8 +119,8 @@ def validate_config(kind, target, config):
     elif kind == "SSL":
         host_port(target, 443)
         number(config, "warn_days", 1, 3650)
-        if config.get("expiry_action", "warn") not in {"warn", "fail"}:
-            raise ValueError("证书预警方式必须为 warn 或 fail")
+        if config.get("expiry_action", "warn") not in {"warn", "fail", "notify"}:
+            raise ValueError("证书预警方式必须为 warn、notify 或 fail")
     elif kind in DATABASE_TYPES:
         validate_database(kind, target, config)
     return config
@@ -196,7 +196,13 @@ def validate_http(target, config):
         raise ValueError("API Key 传递位置必须为 header 或 query")
     if auth_type == "oauth2_client_credentials":
         url = urlparse(str(auth["token_url"]))
-        if url.scheme not in {"http", "https"} or not url.hostname or url.username:
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.fragment
+        ):
             raise ValueError("Token URL 必须为完整 HTTP/HTTPS 地址")
         for key in ("token_params", "token_headers"):
             if key in auth and not isinstance(auth[key], dict):

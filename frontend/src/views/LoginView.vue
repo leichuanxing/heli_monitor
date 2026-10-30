@@ -3,6 +3,9 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import client from '../api/client'
+import BrandLogo from '../components/BrandLogo.vue'
+import ThemeToggle from '../components/ThemeToggle.vue'
+import { theme } from '../stores/theme'
 
 const router = useRouter()
 const username = ref('')
@@ -40,9 +43,9 @@ onMounted(loadBranding)
 </script>
 
 <template>
-  <div class="login">
+  <div class="login"><div class="login-theme"><ThemeToggle/></div>
     <div class="login-shell">
-      <section class="welcome">
+      <section class="welcome"><BrandLogo :theme="theme" :text="branding.brand_logo_text"/><div class="welcome-eyebrow">BUSINESS OBSERVABILITY</div>
         <span>{{branding.login_page_description}}</span>
         <h2>让业务运行状态清晰可见</h2>
         <p>统一监控业务可用性、服务性能、故障事件与告警通知。</p>
@@ -50,8 +53,8 @@ onMounted(loadBranding)
       <el-card shadow="never">
         <div class="form-heading"><small>欢迎登录</small><h1>{{branding.home_page_title}}</h1><p>请输入系统账号和密码</p></div>
         <el-form @submit.prevent="login">
-          <el-form-item><el-input v-model="username" placeholder="用户名" size="large" /></el-form-item>
-          <el-form-item><el-input v-model="password" type="password" show-password placeholder="密码" size="large" @keyup.enter="login" /></el-form-item>
+          <el-form-item><el-input v-model="username" aria-label="用户名" autocomplete="username" placeholder="用户名" size="large" /></el-form-item>
+          <el-form-item><el-input v-model="password" aria-label="密码" autocomplete="current-password" type="password" show-password placeholder="密码" size="large" @keyup.enter="login" /></el-form-item>
           <el-button type="primary" size="large" :loading="loading" @click="login">登录系统</el-button>
         </el-form>
       </el-card>
@@ -60,5 +63,5 @@ onMounted(loadBranding)
 </template>
 
 <style scoped>
-.login{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 18% 18%,#155779 0,transparent 32%),linear-gradient(135deg,#06182b,#0a4058 62%,#087067)}.login-shell{width:min(880px,94vw);display:grid;grid-template-columns:1.05fr .95fr;overflow:hidden;border:1px solid #ffffff20;border-radius:14px;box-shadow:0 28px 70px #020e1966}.welcome{min-height:430px;padding:52px 48px;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;color:#fff;background:linear-gradient(145deg,#0a2d49e8,#07525be8)}.welcome :deep(.brand-logo){width:auto;justify-content:flex-start;margin-bottom:54px}.welcome>span{font-size:10px;letter-spacing:.25em;color:#6dd5e4}.welcome h2{font-size:28px;margin:14px 0 12px}.welcome p{max-width:330px;margin:0;color:#aad0d8;line-height:1.8}.el-card{border:0;border-radius:0;display:grid;align-items:center;padding:40px 35px;background:#fff}.form-heading{margin-bottom:28px}.form-heading small{color:#247496;font-weight:650}.form-heading h1{font-size:25px;line-height:1.35;color:#172d43;margin:8px 0}.form-heading p{font-size:13px;color:#8a98a7;margin:0}.el-button{width:100%;margin-top:5px}@media(max-width:720px){.login-shell{grid-template-columns:1fr}.welcome{display:none}.el-card{min-height:430px;padding:38px 28px}}
+.login{min-height:100dvh;display:grid;place-items:center;padding:40px 24px;background:var(--canvas)}.login-theme{position:fixed;right:28px;top:24px}.login-shell{width:min(980px,100%);display:grid;grid-template-columns:1.05fr 1fr;border:1px solid var(--border);background:var(--surface);border-radius:20px;overflow:hidden;box-shadow:0 12px 50px #15294a08}.welcome{min-height:540px;padding:48px 42px;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;background:var(--brand-soft);color:var(--text-primary)}.welcome :deep(.brand-logo){margin-bottom:70px}.welcome-eyebrow{font-size:10px;letter-spacing:.16em;color:var(--brand);font-weight:650;margin-bottom:10px}.welcome>span{font-size:12px;color:var(--text-secondary)}.welcome h2{font-size:30px;line-height:1.6;letter-spacing:-.04em;margin:16px 0;color:var(--text-primary)}.welcome p{font-size:13px;line-height:1.9;color:var(--muted);max-width:320px;margin:0}.el-card{border:0!important;border-radius:0!important;box-shadow:none!important;display:grid;align-items:center;padding:36px 24px;background:var(--surface)}.form-heading{margin-bottom:32px}.form-heading small{color:var(--brand);font-size:12px;font-weight:600}.form-heading h1{font-size:22px;letter-spacing:-.025em;line-height:1.5;color:var(--text-primary);margin:10px 0}.form-heading p{font-size:12px;color:var(--muted);margin:0}.el-button{width:100%;margin-top:8px;height:42px}.el-form-item{margin-bottom:20px}@media(max-width:720px){.login{padding:70px 16px 24px}.login-shell{grid-template-columns:1fr;max-width:460px}.welcome{min-height:0;padding:26px 28px}.welcome :deep(.brand-logo){margin-bottom:22px}.welcome h2{font-size:23px;margin:8px 0}.welcome-eyebrow,.welcome p{display:none}.el-card{padding:24px 12px}.login-theme{top:18px;right:18px}}
 </style>

@@ -140,7 +140,7 @@ SIMPLE_JWT = {
 }
 SPECTACULAR_SETTINGS = {
     "TITLE": "合力数据业务监控系统 API",
-    "VERSION": "1.0.2",
+    "VERSION": "1.0.3",
     "SERVE_INCLUDE_SCHEMA": False,
 }
 SECURE_CONTENT_TYPE_NOSNIFF = True

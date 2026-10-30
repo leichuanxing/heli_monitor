@@ -23,5 +23,5 @@ function enter() { const item = results.value[selected.value]; if (item) choose(
   </el-dialog>
 </template>
 <style scoped>
-.navigation-results{margin-top:14px;max-height: min(420px,50vh);overflow:auto;display:grid;gap:4px}.navigation-results button{display:flex;align-items:center;justify-content:space-between;text-align:left;padding:12px 14px;border:1px solid transparent;border-radius:8px;background:white;color:#263c52;font:inherit;cursor:pointer}.navigation-results button:hover,.navigation-results button.selected{background:#edf5fc;border-color:#c9def0}.navigation-results small{display:block;font-size:12px;color:#718298;margin-top:4px}.search-hint{font-size:12px;color:#718298}
+.navigation-results{margin-top:14px;max-height: min(420px,50vh);overflow:auto;display:grid;gap:4px}.navigation-results button{display:flex;align-items:center;justify-content:space-between;text-align:left;padding:12px 14px;border:1px solid transparent;border-radius:8px;background:var(--surface);color:var(--text-primary);font:inherit;cursor:pointer}.navigation-results button:hover,.navigation-results button.selected{background:#edf5fc;border-color:#c9def0}.navigation-results small{display:block;font-size:12px;color:var(--muted);margin-top:4px}.search-hint{font-size:12px;color:var(--muted)}
 </style>

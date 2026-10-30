@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import client from '../api/client'
 import BrandLogo from '../components/BrandLogo.vue'
+import { theme } from '../stores/theme'
 import { loadSystemSettings, systemSettings } from '../stores/systemSettings'
 
 const loading = ref(false)
@@ -64,7 +65,7 @@ onMounted(load)
     <template #header><div class="title"><b>品牌显示</b><span>仅使用文本 Logo，不上传图片文件</span></div></template>
     <el-form label-position="top" class="settings-form">
       <el-form-item label="左上角 Logo 文本"><el-input v-model="form.brand_logo_text" maxlength="32" show-word-limit placeholder="例如：合力数据"/><small>显示在应用左侧导航顶部；菜单折叠后显示第一个字符。</small></el-form-item>
-      <div class="preview"><span>显示预览</span><div><BrandLogo theme="dark" :text="form.brand_logo_text || '合力数据'"/></div></div>
+      <div class="preview"><span>显示预览</span><div><BrandLogo :theme="theme" :text="form.brand_logo_text || '合力数据'"/></div></div>
       <el-form-item label="首页标题"><el-input v-model="form.home_page_title" maxlength="64" show-word-limit placeholder="例如：合力数据业务监控系统"/><small>显示在用户登录页的登录表单上方。</small></el-form-item>
       <el-form-item label="登录页说明"><el-input v-model="form.login_page_description" maxlength="128" show-word-limit placeholder="例如：企业级业务可用性监控与告警平台"/><small>显示在登录页左侧的产品说明区域。</small></el-form-item>
       <el-form-item label="浏览器标题"><el-input v-model="form.browser_title" maxlength="64" show-word-limit placeholder="例如：合力数据业务监控系统"/><small>保存后更新浏览器标签页标题。</small></el-form-item>
@@ -82,5 +83,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.heading h2{margin:0;color:#192c42}.heading p{margin:5px 0 0;color:#7b8a9c}.title{display:flex;align-items:end;gap:12px}.title span,.settings-form small{font-size:12px;color:#8593a3}.settings-form{max-width:760px}.settings-form small{display:block;margin-top:6px}.preview{margin:-4px 0 20px}.preview>span{display:block;font-size:12px;color:#68798b;margin-bottom:7px}.preview>div{width:248px;height:72px;display:flex;align-items:center;padding:0 17px;background:linear-gradient(180deg,#071d31,#0a2943);border-radius:6px}.permission-tip{margin-top:16px}
+.heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}.heading h2{margin:0;color:var(--text-primary)}.heading p{margin:5px 0 0;color:var(--muted)}.title{display:flex;align-items:end;gap:12px}.title span,.settings-form small{font-size:12px;color:var(--muted)}.settings-form{max-width:760px}.settings-form small{display:block;margin-top:6px}.preview{margin:-4px 0 20px}.preview>span{display:block;font-size:12px;color:var(--muted);margin-bottom:7px}.preview>div{width:248px;height:72px;display:flex;align-items:center;padding:0 17px;background:var(--surface-subtle);border:1px solid var(--border);border-radius:6px}.permission-tip{margin-top:16px}
 </style>

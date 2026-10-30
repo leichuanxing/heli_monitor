@@ -366,16 +366,22 @@ def ssl_probe(target, config):
                 conn.getpeercert(binary_form=True)
                 info = conn.getpeercert()
         expires = datetime.strptime(info["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=UTC)
-        days = (expires - datetime.now(UTC)).days
+        now = datetime.now(UTC)
+        remaining = expires - now
+        days = remaining.days
         warn = int(config.get("warn_days", 30))
-        ok = expires > datetime.now(UTC) and not (
-            days <= warn and config.get("expiry_action") == "fail"
-        )
+        warning = remaining.total_seconds() <= warn * 86400
+        ok = expires > now and not (warning and config.get("expiry_action") == "fail")
         return _result(
             ok,
             started,
             ssl_days_remaining=days,
-            metrics={"days_remaining": days, "warning": days <= warn},
+            metrics={
+                "days_remaining": days,
+                "warning": warning,
+                "expires_at": expires.isoformat(),
+                "warn_days": warn,
+            },
             detail={
                 "subject": info.get("subject"),
                 "issuer": info.get("issuer"),

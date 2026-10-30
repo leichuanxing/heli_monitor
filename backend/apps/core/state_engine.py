@@ -38,6 +38,12 @@ def apply_result(result):
         if (result.scheduled_at, result.pk) <= (last.scheduled_at, last.pk):
             return state
     previous = state.status
+    certificate_notice = (
+        monitor.monitor_type == "SSL"
+        and monitor.config.get("expiry_action") == "notify"
+        and result.success
+        and result.metrics.get("warning")
+    )
     if not monitor.is_enabled:
         new_status = "PAUSED"
     elif in_maintenance(monitor, result.checked_at):
@@ -45,11 +51,15 @@ def apply_result(result):
         state.consecutive_failures = 0 if result.success else state.consecutive_failures + 1
         new_status = "MAINTENANCE"
     elif result.success:
-        state.consecutive_successes += 1
+        if certificate_notice:
+            state.consecutive_successes = 0
+        else:
+            state.consecutive_successes += 1
         state.consecutive_failures = 0
         if (
             previous in ("DOWN", "DEGRADED", "UNKNOWN")
             and state.consecutive_successes < monitor.recovery_threshold
+            and not certificate_notice
         ):
             new_status = previous
         else:
@@ -103,15 +113,26 @@ def apply_result(result):
         .filter(suppress_notifications=True)
         .exists()
     )
-    if not result.success and (new_status in ("DEGRADED", "DOWN") or maintenance_alerts):
+    if (not result.success or certificate_notice) and (
+        new_status in ("DEGRADED", "DOWN") or maintenance_alerts
+    ):
         number = f"INC-{result.checked_at:%Y%m%d}-{str(monitor.id)[:8]}-{result.id}"
         incident, created = Incident.objects.get_or_create(
             monitor=monitor,
             status__in=OPEN,
             defaults={
                 "number": number,
-                "title": f"{monitor.name} 不可用",
-                "summary": result.error_summary or "探测失败",
+                "title": (
+                    f"{monitor.name} 证书即将到期"
+                    if certificate_notice
+                    else f"{monitor.name} 不可用"
+                ),
+                "summary": (
+                    f"SSL 证书到期时间：{result.detail.get('not_after', '未知')}；"
+                    f"剩余 {result.ssl_days_remaining} 天，请及时续期。"
+                    if certificate_notice
+                    else result.error_summary or "探测失败"
+                ),
             },
         )
         if created:

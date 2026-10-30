@@ -1,6 +1,7 @@
+import json
 import re
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.contrib.auth.models import User
@@ -9,6 +10,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.accounts.models import Department, Role, UserProfile
@@ -295,6 +297,14 @@ class BusinessSystemSerializer(BaseSerializer):
         return attrs
 
 
+class CertificateStatusSerializer(serializers.Serializer):
+    expires_at = serializers.DateTimeField(allow_null=True, read_only=True)
+    days_remaining = serializers.IntegerField(allow_null=True, read_only=True)
+    warning = serializers.BooleanField(read_only=True)
+    checked_at = serializers.DateTimeField(read_only=True)
+    stale = serializers.BooleanField(read_only=True)
+
+
 class MonitorSerializer(BaseSerializer):
     secret_mask = "********"
     business_name = serializers.CharField(source="business.name", read_only=True)
@@ -303,6 +313,27 @@ class MonitorSerializer(BaseSerializer):
     last_checked_at = serializers.SerializerMethodField()
     last_latency_ms = serializers.SerializerMethodField()
     last_error = serializers.SerializerMethodField()
+    certificate = serializers.SerializerMethodField()
+
+    @extend_schema_field(CertificateStatusSerializer(allow_null=True))
+    def get_certificate(self, obj) -> dict | None:
+        if obj.monitor_type != "SSL":
+            return None
+        _, result = self._state_and_result(obj)
+        if result is None:
+            return None
+        return {
+            "expires_at": result.detail.get("not_after"),
+            "days_remaining": result.ssl_days_remaining,
+            "warning": bool(result.metrics.get("warning")),
+            "checked_at": result.checked_at,
+            "stale": (
+                result.checked_at
+                < timezone.now()
+                - timedelta(seconds=max(3 * obj.interval_seconds, obj.timeout_seconds + 30, 60))
+                or result.checked_at > timezone.now() + timedelta(seconds=30)
+            ),
+        }
 
     def _state_and_result(self, obj):
         state = getattr(obj, "state", None)
@@ -366,7 +397,15 @@ class MonitorSerializer(BaseSerializer):
             raise serializers.ValidationError({"timeout_seconds": "必须小于探测周期"})
         old = getattr(self.instance, "config", {}) or {}
         auth = config.get("auth", {})
-        for key in ("token", "password", "value", "client_secret"):
+        for key in (
+            "token",
+            "password",
+            "value",
+            "client_secret",
+            "login_body",
+            "login_headers",
+            "login_params",
+        ):
             if auth.get(key) == self.secret_mask:
                 auth[key] = (old.get("auth") or {}).get(key, "")
         if config.get("password") == self.secret_mask:
@@ -385,9 +424,21 @@ class MonitorSerializer(BaseSerializer):
         except (ValueError, TypeError) as exc:
             raise serializers.ValidationError({"config": str(exc)}) from exc
         auth = config.get("auth", {})
-        for key in ("token", "password", "value", "client_secret"):
+        for key in (
+            "token",
+            "password",
+            "value",
+            "client_secret",
+            "login_body",
+            "login_headers",
+            "login_params",
+        ):
             if auth.get(key):
-                auth[key] = encrypt_secret(auth[key])
+                auth[key] = encrypt_secret(
+                    json.dumps(auth[key], ensure_ascii=False)
+                    if isinstance(auth[key], dict)
+                    else auth[key]
+                )
         for key, value in (config.get("headers") or {}).items():
             if key.lower() in SECRET_HEADERS and value:
                 config["headers"][key] = encrypt_secret(value)
@@ -445,7 +496,15 @@ class MonitorSerializer(BaseSerializer):
         if not isinstance(config.get("headers", {}), dict):
             config["headers"] = {}
         data["config"] = config
-        for key in ("token", "password", "value", "client_secret"):
+        for key in (
+            "token",
+            "password",
+            "value",
+            "client_secret",
+            "login_body",
+            "login_headers",
+            "login_params",
+        ):
             if config.get("auth", {}).get(key):
                 config["auth"][key] = self.secret_mask
         for key in config.get("headers", {}):
